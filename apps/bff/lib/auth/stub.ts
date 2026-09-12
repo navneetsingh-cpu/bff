@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { LOGGED_OUT_PATH } from '@bff/session-sync/contract';
 import { readSessionId, setSessionCookie } from '../cookies';
 import { safeReturnTo } from '../redirects';
 import { rotateSessionOnLogin } from '../session';
@@ -104,5 +105,11 @@ export const stubProvider: AuthProvider = {
       { error: 'not_applicable', detail: 'AUTH_MODE=stub has no OIDC callback.' },
       { status: 404 },
     );
+  },
+
+  async buildLogoutRedirect(req: NextRequest): Promise<string> {
+    // No identity provider in the picture, so destroying the local session is
+    // the whole of sign-out.
+    return new URL(LOGGED_OUT_PATH, req.nextUrl.origin).toString();
   },
 };

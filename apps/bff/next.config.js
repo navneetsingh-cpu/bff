@@ -31,7 +31,7 @@ const nextConfig = {
   // hoisted node_modules are left out of the output.
   outputFileTracingRoot: path.join(__dirname, '../../'),
   // The shared package ships TypeScript source, so Next compiles it in-place.
-  transpilePackages: ['@bff/internal-auth'],
+  transpilePackages: ['@bff/internal-auth', '@bff/session-sync'],
   poweredByHeader: false,
 };
 

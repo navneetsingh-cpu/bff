@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { Issuer, generators, type Client, type IdTokenClaims } from 'openid-client';
+import { LOGGED_OUT_PATH } from '@bff/session-sync/contract';
 import { azure } from '../env';
 import {
   clearTransientCookie,
@@ -168,6 +169,38 @@ export const oidcProvider: AuthProvider = {
     } catch (error) {
       console.error('[oidc] callback failed:', error instanceof Error ? error.message : error);
       return fail('Could not complete sign-in.', 401);
+    }
+  },
+
+  async buildLogoutRedirect(req: NextRequest): Promise<string> {
+    const loggedOut = new URL(LOGGED_OUT_PATH, req.nextUrl.origin).toString();
+
+    // Destroying the local session is not enough on its own. The user still has
+    // a live sign-in session with Entra, so the next visit to /api/auth/login
+    // would sign them straight back in without a prompt — which does not look
+    // like "signed out" to anyone. This is the front-channel logout that ends
+    // the session at the identity provider too.
+    try {
+      const client = await getClient();
+
+      // `post_logout_redirect_uri` has to be registered on the app
+      // registration, exactly as sent, or Entra drops the user on its own page
+      // instead of bringing them back here.
+      return client.endSessionUrl({ post_logout_redirect_uri: loggedOut });
+
+      // Passing `id_token_hint` here would let Entra sign out the specific
+      // account without showing an account picker. It would mean keeping the
+      // raw ID token in the session record, which is a deliberate change to
+      // what Redis holds — not made yet.
+    } catch (error) {
+      // No end_session_endpoint in the discovery document, or discovery itself
+      // failed. The local session is already destroyed, so the honest outcome
+      // is to confirm that much rather than error out.
+      console.warn(
+        '[oidc] no end-session redirect available, falling back to local confirmation:',
+        error instanceof Error ? error.message : error,
+      );
+      return loggedOut;
     }
   },
 };

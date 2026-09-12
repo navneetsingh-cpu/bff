@@ -88,6 +88,42 @@ export async function peekSession(sid: string | undefined | null): Promise<Sessi
 export async function destroySession(sid: string | undefined | null): Promise<void> {
   if (!sid) return;
   await getRedis().del(keyFor(sid));
+
+  // TODO: cross-device sign-out.
+  //
+  // Today, sign-out propagates to other tabs via BroadcastChannel (see
+  // packages/session-sync). That is origin-scoped and browser-scoped: it cannot
+  // reach the same user's phone, their other browser, or an incognito window.
+  // Those sessions stay live until their own idle timeout expires.
+  //
+  // The piece that closes that gap is a server push, and this function is where
+  // it starts. Roughly:
+  //
+  //   1. Publish here, right after the DEL:
+  //        await getRedis().publish(`user:${record.userId}:events`,
+  //                                 JSON.stringify({ type: 'logout', at: Date.now() }))
+  //      That needs the record, so read it before deleting rather than after.
+  //      Note this revokes ONE session; signing out every device means
+  //      tracking the user's session ids in a `user:<id>:sessions` set and
+  //      DEL-ing the lot.
+  //
+  //   2. Add app/api/session/stream/route.ts — a Node-runtime handler holding
+  //      an SSE response open. It resolves the session, SUBSCRIBEs to that
+  //      user's channel on a SECOND Redis connection (a subscribed ioredis
+  //      client can't run normal commands, so it cannot be the shared one from
+  //      lib/redis.ts), and writes an event per message. Send a periodic
+  //      comment frame to survive idle-connection reapers, and clean up on
+  //      request.signal abort or the subscription leaks per dropped client.
+  //
+  //   3. Have SessionSync open an EventSource to that endpoint alongside the
+  //      BroadcastChannel, and treat a server 'logout' event exactly like a
+  //      broadcast one. The `at` field on SessionLogoutMessage exists so a tab
+  //      can ignore an event that predates what it has already acted on.
+  //
+  // Not built yet on purpose — it adds a long-lived connection per open tab, a
+  // second Redis connection per connected client, and a reconnect story, none
+  // of which is worth it until cross-device revocation is an actual
+  // requirement rather than a nice idea.
 }
 
 /**

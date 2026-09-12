@@ -8,7 +8,7 @@ const nextConfig = {
   // the BFF proxies. Nothing has to be rewritten in between.
   basePath: '/connect',
   outputFileTracingRoot: path.join(__dirname, '../../'),
-  transpilePackages: ['@bff/internal-auth'],
+  transpilePackages: ['@bff/internal-auth', '@bff/session-sync'],
   poweredByHeader: false,
 };
 

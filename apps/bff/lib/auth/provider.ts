@@ -18,6 +18,19 @@ export interface AuthProvider {
   submitLogin(req: NextRequest): Promise<Response>;
   /** GET /api/auth/callback */
   handleCallback(req: NextRequest): Promise<Response>;
+  /**
+   * Absolute URL to send the browser to *after* the local session has already
+   * been destroyed and the cookie cleared.
+   *
+   * stub — straight to the confirmation page, there is nothing else to tell.
+   * oidc — the identity provider's end_session_endpoint, so the user is signed
+   *        out of Entra too and not silently signed back in on the next login.
+   *
+   * Must never throw: the local session is already gone by the time this is
+   * called, so a failure here has to degrade to the confirmation page rather
+   * than leave the user on an error with no session and no explanation.
+   */
+  buildLogoutRedirect(req: NextRequest): Promise<string>;
 }
 
 export async function getAuthProvider(): Promise<AuthProvider> {

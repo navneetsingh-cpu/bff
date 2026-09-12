@@ -70,6 +70,7 @@ services:
     volumes:
       - ./apps/bff:/app/apps/bff
       - ./packages/internal-auth:/app/packages/internal-auth
+      - ./packages/session-sync:/app/packages/session-sync
       # Keep build output inside the container: it's large, churns constantly,
       # and writing it back to a Windows/macOS bind mount is slow.
       - bff_next:/app/apps/bff/.next
@@ -105,6 +106,7 @@ services:
     volumes:
       - ./apps/connect:/app/apps/connect
       - ./packages/internal-auth:/app/packages/internal-auth
+      - ./packages/session-sync:/app/packages/session-sync
       - connect_next:/app/apps/connect/.next
 
   iif:
@@ -118,6 +120,7 @@ services:
     volumes:
       - ./apps/iif:/app/apps/iif
       - ./packages/internal-auth:/app/packages/internal-auth
+      - ./packages/session-sync:/app/packages/session-sync
       - iif_next:/app/apps/iif/.next
 
   handbook:
@@ -131,6 +134,7 @@ services:
     volumes:
       - ./apps/handbook:/app/apps/handbook
       - ./packages/internal-auth:/app/packages/internal-auth
+      - ./packages/session-sync:/app/packages/session-sync
       - handbook_next:/app/apps/handbook/.next
 
 networks:

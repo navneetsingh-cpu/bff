@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { LogoutButton } from '@bff/session-sync';
 
 interface MeResponse {
   authenticated: boolean;
@@ -83,12 +84,7 @@ export function CurrentUser() {
         <dd>{me.session ? new Date(me.session.createdAt).toLocaleString() : '—'}</dd>
       </dl>
       <div className="actions">
-        {/* Form POST, so the origin check in middleware applies. */}
-        <form method="post" action="/api/auth/logout">
-          <button className="button" type="submit">
-            Sign out
-          </button>
-        </form>
+        <LogoutButton />
         <span style={{ fontSize: '0.8125rem', color: 'var(--muted)' }}>
           AUTH_MODE=<code>{me.authMode}</code>
         </span>

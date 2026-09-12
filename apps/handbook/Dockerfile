@@ -18,6 +18,7 @@ COPY apps/connect/package.json ./apps/connect/
 COPY apps/iif/package.json ./apps/iif/
 COPY apps/handbook/package.json ./apps/handbook/
 COPY packages/internal-auth/package.json ./packages/internal-auth/
+COPY packages/session-sync/package.json ./packages/session-sync/
 RUN npm ci
 
 # ---------------------------------------------------------------------------

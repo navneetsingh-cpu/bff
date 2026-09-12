@@ -93,3 +93,34 @@ code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8125rem;
 }
+
+.app-header {
+  inline-size: min(44rem, 100%);
+  margin: 0 auto 2rem;
+  padding-block-end: 1rem;
+  border-block-end: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.app-header__title {
+  font-weight: 600;
+}
+
+.button {
+  display: inline-block;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4375rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.button:hover {
+  border-color: color-mix(in srgb, currentColor 45%, transparent);
+}

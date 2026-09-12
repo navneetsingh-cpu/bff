@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(docker compose config --quiet)"
+      "PowerShell(docker compose config --quiet)",
+      "PowerShell(npm install --no-audit --no-fund 2>&1)",
+      "PowerShell(npm ci --dry-run --no-audit --no-fund 2>&1)"
     ]
   }
 }
