@@ -1,0 +1,225 @@
+name: bff-starter-prod
+
+# ---------------------------------------------------------------------------
+# PRODUCTION setup. Same apps as docker-compose.yml, but built for real use.
+#
+#   browser :3000  ->  bff  ->  connect | iif | handbook
+#                       \
+#                        `->  redis   (stores login sessions)
+#
+# The BFF is the only door in. It logs the user in, keeps the session, and
+# forwards requests to the three sub-apps. The sub-apps are never exposed.
+#
+# How to run it:
+#   npm run up:prod
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Note: this is a standalone file, NOT an add-on to docker-compose.yml.
+# If we layered them, we'd drag dev settings (live code mounts, dev builds)
+# into production by accident.
+#
+# Dev vs prod, in short:
+#   - prod builds a slim, pre-compiled image (no source code, no dev tools,
+#     runs as a non-root user)
+#   - no live code mounting - the built image IS what runs
+#   - all secrets must be provided; no fallback values
+#   - Redis saves to disk and needs a password
+#
+# Still TODO before going live: HTTPS. Put a load balancer in front of this
+# and have it send the header X-Forwarded-Proto: https.
+# ---------------------------------------------------------------------------
+
+# Shared settings reused by several services below (YAML "anchors").
+x-common-env: &common-env
+  NODE_ENV: production
+  # The `:?` means: if this value is missing, refuse to start.
+  # Better to fail loudly than to silently run with a dev secret.
+  INTERNAL_JWT_SECRET: ${INTERNAL_JWT_SECRET:?set INTERNAL_JWT_SECRET in .env.production}
+  INTERNAL_JWT_ISSUER: ${INTERNAL_JWT_ISSUER:-bff}
+
+# Keep logs from filling the disk: 5 files of 10 MB, then the oldest is dropped.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+# Settings shared by all three sub-apps (connect / iif / handbook).
+x-subapp: &subapp
+  restart: always
+  expose:
+    - '3000' # visible to other containers only, NOT to the outside world
+  networks:
+    - internal
+  logging: *logging
+  environment:
+    <<: *common-env
+  stop_grace_period: 20s # give it 20s to finish requests before killing it
+
+services:
+  # --- Session store -------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    # Unlike dev, sessions survive a restart because Redis writes to disk.
+    # "everysec" = worst case we lose 1 second of data. Good speed/safety mix.
+    command:
+      [
+        'redis-server',
+        '--appendonly', 'yes',
+        '--appendfsync', 'everysec',
+        '--requirepass', '${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.production}',
+      ]
+    restart: always
+    networks:
+      - internal
+    volumes:
+      - redis_data:/data # the disk where sessions are kept
+    environment:
+      # The health check reads the password from here instead of typing it on
+      # the command line, so it doesn't leak into `docker inspect` / `ps`.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    logging: *logging
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping'] # answers "PONG" when alive
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # --- The BFF: login, sessions, and routing to the sub-apps ---------------
+  bff:
+    build:
+      context: .
+      dockerfile: apps/bff/Dockerfile
+      target: runner # the slim production stage of the Dockerfile
+    image: bff-starter/bff:${IMAGE_TAG:-latest}
+    restart: always
+    environment:
+      <<: *common-env
+      AUTH_MODE: ${AUTH_MODE:-oidc}
+      # The public URL users type in the browser. Without it, login redirects
+      # get built from internal names like http://0.0.0.0:3000 and break.
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      # The "__Host-" prefix only works on HTTPS cookies, so this needs TLS.
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-__Host-sid}
+      SESSION_IDLE_SECONDS: ${SESSION_IDLE_SECONDS:-1800} # logout after 30m idle
+      SESSION_ABSOLUTE_SECONDS: ${SESSION_ABSOLUTE_SECONDS:-28800} # max 8h session
+      INTERNAL_JWT_TTL_SECONDS: ${INTERNAL_JWT_TTL_SECONDS:-60} # short-lived internal token
+      # Using a managed Redis instead? Set REDIS_URL and delete the redis
+      # service above.
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379}
+      # Internal addresses of the sub-apps (container name = hostname).
+      CONNECT_ORIGIN: http://connect:3000
+      IIF_ORIGIN: http://iif:3000
+      HANDBOOK_ORIGIN: http://handbook:3000
+      # Microsoft Entra ID (Azure AD) login settings.
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      REDIRECT_URI: ${REDIRECT_URI:-}
+      OIDC_SCOPE: ${OIDC_SCOPE:-openid profile email}
+    ports:
+      # Only listens on localhost by default - the HTTPS load balancer in front
+      # should be the public one, not this app.
+      # Set BFF_BIND=0.0.0.0 to expose it directly (testing only).
+      - '${BFF_BIND:-127.0.0.1}:${BFF_PORT:-3000}:3000'
+    depends_on:
+      # Wait until everything below is actually healthy before starting.
+      redis:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+      iif:
+        condition: service_healthy
+      handbook:
+        condition: service_healthy
+    networks:
+      - edge # public side
+      - internal # private side, to reach redis + sub-apps
+    logging: *logging
+    stop_grace_period: 20s
+    healthcheck:
+      # We call the health URL with node instead of curl/wget, because this
+      # slim image doesn't include them. Here we do check for a 200 response.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s # grace period while the app boots
+
+  # --- The three sub-apps --------------------------------------------------
+  # Each is identical apart from its name and path.
+  # Their health checks accept ANY response, not just 200: these apps reply 401
+  # to requests without a login, so demanding a 200 would mark them "unhealthy"
+  # forever. Any answer at all proves the server is up.
+  connect:
+    <<: *subapp
+    build:
+      context: .
+      dockerfile: apps/connect/Dockerfile
+      target: runner
+    image: bff-starter/connect:${IMAGE_TAG:-latest}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/connect',r=>process.exit(0)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  iif:
+    <<: *subapp
+    build:
+      context: .
+      dockerfile: apps/iif/Dockerfile
+      target: runner
+    image: bff-starter/iif:${IMAGE_TAG:-latest}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/iif',r=>process.exit(0)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  handbook:
+    <<: *subapp
+    build:
+      context: .
+      dockerfile: apps/handbook/Dockerfile
+      target: runner
+    image: bff-starter/handbook:${IMAGE_TAG:-latest}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/handbook',r=>process.exit(0)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+# Two networks, so the sub-apps can't be reached from outside.
+networks:
+  edge: # public-facing; only the bff is on it
+    driver: bridge
+  internal: # private; bff <-> redis + sub-apps
+    driver: bridge
+    # Fully cut off from the internet. Side effect: the sub-apps cannot make
+    # outbound calls. Only the bff is on `edge`, since only it talks to the
+    # identity provider.
+    internal: true
+
+# Named volume = Redis data survives `docker compose down` and restarts.
+volumes:
+  redis_data:

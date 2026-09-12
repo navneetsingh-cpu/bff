@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
-import { LogoutButton, SessionSync } from '@bff/session-sync';
+import { headers } from 'next/headers';
+import { SessionSync } from '@bff/session-sync';
+import { AppHeader } from '@internal/ui';
+import { verifyRequestIdentity } from '@/lib/identity';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -7,18 +10,21 @@ export const metadata: Metadata = {
   description: 'Policy documents',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+/**
+ * Async because the header needs a user, and this app only ever learns who
+ * the caller is from the verified assertion. The header itself never
+ * fetches — it renders what the layout already read.
+ */
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const result = await verifyRequestIdentity(headers());
+  const user = result.ok ? { name: result.identity.name, email: result.identity.email } : null;
+
   return (
     <html lang="en">
       <body>
         {/* Renders nothing. Follows a sign-out that happened in another tab. */}
         <SessionSync />
-        <header className="app-header">
-          <span className="app-header__title">Handbook</span>
-          {/* Posts to the BFF's /api/auth/logout — a plain form action, so
-              basePath does not rewrite it to /handbook/api/auth/logout. */}
-          <LogoutButton />
-        </header>
+        <AppHeader currentZone="handbook" user={user} />
         {children}
       </body>
     </html>

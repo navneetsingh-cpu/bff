@@ -403,6 +403,90 @@ which one you're building.
 
 ---
 
+## e) Shared UI
+
+`packages/ui` (`@internal/ui`) holds the header every zone renders. It is
+small on purpose — the interesting part is not the component, it is what a
+shared package has to do to survive a standalone production build.
+
+### Why the package ships untranspiled
+
+There is no build step. `main` and `types` both point straight at
+`./src/index.ts`, and consumers name the package in `transpilePackages` so
+Next compiles the TSX in place, with the consuming app's own Babel/SWC
+settings.
+
+The alternative is a `tsup`/`rollup` step emitting `dist/`. That buys nothing
+here and costs plenty: a second compiler to configure, a build ordering
+constraint between packages and apps, stale `dist/` output whenever someone
+edits source without rebuilding, and source maps that point at generated code.
+Shipping source means editing `packages/ui/src` hot-reloads in every app that
+has it bind-mounted, and there is exactly one compiler in the repo.
+
+The cost is real but narrow: anything importing this package must be able to
+compile TSX, which is why every app lists it in `transpilePackages`. A plain
+`node` process could not `require` it.
+
+### Why cross-zone links are anchors
+
+`NavLink` renders `next/link` when `targetZone === currentZone`, and a plain
+`<a>` otherwise.
+
+Each zone is a separate Next application, in a separate container, with its own
+router, its own build manifest and its own basePath. A client-side transition
+from `/connect` to `/iif` asks the *Connect* router for a route it has never
+heard of. The RSC fetch resolves against the wrong basePath and 404s — and
+even if it somehow resolved, the BFF would never see a document request, so it
+would never mint an assertion for IIF and the destination would reject the
+caller.
+
+A full document request is therefore the feature, not a regression: it goes
+through the BFF, which reads the session and mints the assertion the
+destination requires. `prefetch={false}` does not help; the problem is the
+client-side navigation itself, not the prefetch.
+
+For the same family of reasons, active state comes from the `currentZone` prop
+and never from `usePathname()`. A sub-app strips its basePath before the router
+sees the URL, so Connect serving `/connect/teams` reports `/teams`. Matching
+that against `/connect` fails, and the header lights up the wrong tab or none.
+The rendering app is the only thing that reliably knows which zone it is.
+
+### The three things that break a standalone build
+
+Each of these fails in the same maddening way: fine in `next dev`, broken in
+the container.
+
+**1. Missing `transpilePackages`.** Dev is forgiving; the production build is
+not. Without the app naming `@internal/ui`, the build tries to consume raw TSX
+from `node_modules` and dies on the first `<` it reads — `Module parse failed:
+Unexpected token`.
+
+**2. Missing tracing includes.** `output: 'standalone'` copies only what the
+file tracer proves is reachable. A workspace package consumed as source is
+inlined into the compiled output, so nothing in the trace points back at
+`packages/ui`, and the directory is left out of the runner image. The app then
+builds cleanly and crashes at container start with `Cannot find module
+'@internal/ui'`. Naming it in `experimental.outputFileTracingIncludes` is what
+puts it in the image.
+
+Note that both tracing options live under `experimental` in Next 14. A
+top-level `outputFileTracingRoot` is accepted by the config object and then
+silently ignored — Next reads `config.experimental.outputFileTracingRoot`.
+Nothing warns you. It appears to work anyway, because when the option is unset
+Next walks up to the workspace root and infers it.
+
+**3. Wrong `CMD` path.** With `outputFileTracingRoot` at the monorepo root, the
+standalone output reproduces the repo layout: the entry point is
+`apps/<name>/server.js`, not `./server.js`. A Dockerfile that copies standalone
+to the image root and runs `node server.js` exits immediately with `Cannot
+find module '/app/server.js'`.
+
+A fourth, less famous one: the `deps` stage must copy `packages/ui/package.json`
+along with every other workspace manifest. The lockfile declares the workspace,
+so `npm ci` fails outright if the directory is not there.
+
+---
+
 ## Vite SPA vs. this stack
 
 | | Vite SPA + MSAL | Next.js BFF (this repo) |

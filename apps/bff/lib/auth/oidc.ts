@@ -8,7 +8,7 @@ import {
   setSessionCookie,
   setTransientCookie,
 } from '../cookies';
-import { safeReturnTo } from '../redirects';
+import { publicOrigin, safeReturnTo } from '../redirects';
 import { rotateSessionOnLogin, type NewSessionInput } from '../session';
 import type { AuthProvider } from './provider';
 
@@ -162,7 +162,7 @@ export const oidcProvider: AuthProvider = {
 
       const sid = await rotateSessionOnLogin(readSessionId(req), user);
 
-      const res = NextResponse.redirect(new URL(returnTo, req.nextUrl.origin), { status: 303 });
+      const res = NextResponse.redirect(new URL(returnTo, publicOrigin(req)), { status: 303 });
       setSessionCookie(res, sid);
       for (const name of TRANSIENT_COOKIES) clearTransientCookie(res, name);
       return res;
@@ -173,7 +173,7 @@ export const oidcProvider: AuthProvider = {
   },
 
   async buildLogoutRedirect(req: NextRequest): Promise<string> {
-    const loggedOut = new URL(LOGGED_OUT_PATH, req.nextUrl.origin).toString();
+    const loggedOut = new URL(LOGGED_OUT_PATH, publicOrigin(req)).toString();
 
     // Destroying the local session is not enough on its own. The user still has
     // a live sign-in session with Entra, so the next visit to /api/auth/login

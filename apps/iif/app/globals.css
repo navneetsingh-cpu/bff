@@ -72,15 +72,6 @@ dd {
   word-break: break-word;
 }
 
-ul.stub {
-  margin: 0;
-  padding-left: 1.125rem;
-  color: var(--muted);
-}
-
-ul.stub li {
-  margin: 0.25rem 0;
-}
 
 a.back {
   display: inline-block;

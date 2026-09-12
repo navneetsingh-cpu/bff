@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { LOGGED_OUT_PATH } from '@bff/session-sync/contract';
 import { readSessionId, setSessionCookie } from '../cookies';
-import { safeReturnTo } from '../redirects';
+import { publicOrigin, safeReturnTo } from '../redirects';
 import { rotateSessionOnLogin } from '../session';
 import { STUB_USERS, findStubUser } from './users';
 import type { AuthProvider } from './provider';
@@ -95,7 +95,7 @@ export const stubProvider: AuthProvider = {
     const returnTo = safeReturnTo(form.get('returnTo')?.toString());
     const sid = await rotateSessionOnLogin(readSessionId(req), user);
 
-    const res = NextResponse.redirect(new URL(returnTo, req.nextUrl.origin), { status: 303 });
+    const res = NextResponse.redirect(new URL(returnTo, publicOrigin(req)), { status: 303 });
     setSessionCookie(res, sid);
     return res;
   },
@@ -110,6 +110,6 @@ export const stubProvider: AuthProvider = {
   async buildLogoutRedirect(req: NextRequest): Promise<string> {
     // No identity provider in the picture, so destroying the local session is
     // the whole of sign-out.
-    return new URL(LOGGED_OUT_PATH, req.nextUrl.origin).toString();
+    return new URL(LOGGED_OUT_PATH, publicOrigin(req)).toString();
   },
 };

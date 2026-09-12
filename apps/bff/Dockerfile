@@ -5,8 +5,21 @@
 #
 #   docker build -f apps/bff/Dockerfile .
 
-FROM node:20-alpine AS base
-RUN apk add --no-cache libc6-compat
+# Debian (glibc), not alpine (musl) — deliberately, and only for this app.
+#
+# musl's getaddrinfo asks Docker's embedded resolver (127.0.0.11) for A and
+# AAAA on one socket, and what comes back for login.microsoftonline.com is
+# AAAA only — 48 IPv6 addresses and not one IPv4. The container has no IPv6
+# route, so every OIDC discovery call dies with ENETUNREACH and /api/auth/login
+# 500s. glibc resolves the same name to both families with IPv4 first.
+#
+# `--dns-result-order=ipv4first` does not help: it reorders what getaddrinfo
+# returned, and under musl there is no IPv4 entry in the list to promote.
+#
+# The three sub-apps stay on alpine. They sit on the `internal` network with no
+# route off the host and resolve nothing but container names, which the
+# embedded DNS answers correctly.
+FROM node:22-slim AS base
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -24,6 +37,7 @@ COPY apps/iif/package.json ./apps/iif/
 COPY apps/handbook/package.json ./apps/handbook/
 COPY packages/internal-auth/package.json ./packages/internal-auth/
 COPY packages/session-sync/package.json ./packages/session-sync/
+COPY packages/ui/package.json ./packages/ui/
 RUN npm ci
 
 # ---------------------------------------------------------------------------
@@ -48,7 +62,7 @@ FROM base AS builder
 ENV NODE_ENV=production
 COPY --from=deps /app ./
 COPY . .
-RUN npm run build --workspace=@bff/bff
+RUN npm run build --workspace=apps/bff
 
 # ---------------------------------------------------------------------------
 # runner — no source, no npm, no dev dependencies. Just the traced output.

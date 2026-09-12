@@ -18,7 +18,7 @@ language and without assuming you know anything about OIDC.
 ## Quick start
 
 You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or
-Docker Engine with Compose v2) and Node 20.
+Docker Engine with Compose v2) and Node 22.
 
 ```bash
 npm install
@@ -251,6 +251,8 @@ Copy `.env.example` to `.env` and edit. Every variable has a working default in
 | `REDIRECT_URI` | `http://localhost:3000/api/auth/callback` | Where Entra sends you back. Must match the app registration exactly. |
 | `OIDC_SCOPE` | `openid profile email` | What to ask Entra for. |
 | `WATCHPACK_POLLING` | `true` | Poll the filesystem for changes. Needed for hot reload on Windows and macOS bind mounts; set `false` on Linux for lower idle CPU. |
+| `ENTITLEMENTS_SOURCE` | `mock` | Where the Connect app resolves permissions from. `mock` = hardcoded map, no network. `api` = a real service. |
+| `ENTITLEMENTS_API_URL` | *(blank)* | Base URL of that service. Only read when `ENTITLEMENTS_SOURCE=api`, and required then. |
 
 `CONNECT_ORIGIN`, `IIF_ORIGIN` and `HANDBOOK_ORIGIN` are set directly in
 `docker-compose.yml` — they're container names on the internal network and
@@ -282,6 +284,79 @@ npm run typecheck --workspaces --if-present  # typecheck everything
 
 ---
 
+## Entitlements in the Connect app
+
+Connect resolves its own permissions. Roles travel in the assertion and describe
+the person org-wide (`employee`, `iif.approver`); entitlements are resolved
+inside Connect and describe what *this* app lets them do
+(`connect.viewAll`, `connect.editProfile`). Keeping them apart means the BFF
+never has to learn Connect's permission vocabulary.
+
+**Where it lives**
+
+| Path | What it is |
+| --- | --- |
+| `apps/connect/lib/entitlements.ts` | `getEntitlements(claims)` — the mock and api sources, plus the cache. |
+| `apps/connect/app/api/entitlements/route.ts` | `GET` handler returning the same data as JSON. |
+| `apps/connect/app/page.tsx` | Server component. Calls `getEntitlements` directly. |
+
+**Why the URL has `/connect` in it but the folder doesn't**
+
+The route file sits at `app/api/entitlements/` and answers at
+`/connect/api/entitlements`. The prefix comes from `basePath: '/connect'` in
+`apps/connect/next.config.js`, which is also the path the BFF proxies — so the
+same string is the public path and the internal one, and nothing rewrites it in
+between. Fetches from the browser must include it: `/connect/api/entitlements`,
+not `/api/entitlements`.
+
+The page doesn't use that route — it calls `getEntitlements` directly, because
+the page and the route run in the same process and an HTTP hop between them
+would buy nothing. The route exists for browser callers, and the button at the
+bottom of the page proves it answers.
+
+**What you should see**
+
+`ENTITLEMENTS_SOURCE=mock` gives the three seeded stub users three different
+permission sets, so switching users on the login screen changes the page:
+
+| Stub user | Permissions | Page shows |
+| --- | --- | --- |
+| Ada Lovelace | `connect.viewAll`, `connect.editProfile` | Everyone, with an Edit profile button |
+| Grace Hopper | `connect.editProfile` | Her own record, with an Edit profile button |
+| Alan Turing | *(none)* | His own record, no button |
+
+Alan holds the `connect.admin` **role** and still gets no entitlements — that's
+the two systems being separate, on purpose.
+
+Hiding the Edit profile button is UX only. Anyone can POST to an edit endpoint
+by hand, so the real check has to run server-side in the action, re-resolving
+entitlements from the assertion the same way the page does.
+
+**Flipping to the api source later**
+
+```ini
+ENTITLEMENTS_SOURCE=api
+ENTITLEMENTS_API_URL=https://entitlements.internal.example
+```
+
+The api branch is written but not connected to anything in this stack: axios
+with a 3 s timeout, one retry on 5xx only, and the response parsed through the
+same zod schema as the mock, so a service that drifts fails at the boundary
+instead of halfway through a render. Before it works you need to fill in the
+`TODO` in `apps/connect/lib/entitlements.ts` — the real path, and whether to
+forward the internal assertion or attach a service credential.
+
+Running under Docker, add the two variables to the `connect` service in
+`docker-compose.yml`; they aren't passed through today because the `mock`
+default needs no configuration.
+
+The 60-second cache is an in-memory `Map` in one container. Two replicas keep
+two independent caches, so a permission change can land on one and not the
+other until the TTL expires — move it to Redis before scaling Connect past one
+instance.
+
+---
+
 ## Switching to real login
 
 Create an app registration in Microsoft Entra, then in `.env`:
@@ -301,6 +376,109 @@ to match character for character. Then `docker compose up -d bff`.
 Nothing downstream changes: both modes implement the same
 [`AuthProvider`](apps/bff/lib/auth/provider.ts) interface, and no route handler
 branches on `AUTH_MODE`.
+
+---
+
+## Running the production build
+
+`docker-compose.yml` is the dev stack: `dev` build targets, bind-mounted source,
+`next dev`. The production stack is a separate, standalone file,
+[`docker-compose.prod.yml`](docker-compose.prod.yml) — not an override layered on
+top of the dev one, because layering would inherit the bind mounts and the dev
+targets, which is the whole thing being avoided.
+
+```bash
+cp .env.production.example .env.production   # PowerShell: Copy-Item
+# fill in INTERNAL_JWT_SECRET and REDIS_PASSWORD, at minimum
+
+npm run build:prod    # build the four images, no containers started
+npm run up:prod       # build + start detached
+npm run logs:prod     # follow
+npm run ps:prod       # health of each container
+npm run down:prod     # stop and remove (the redis volume survives)
+```
+
+Those five cover the normal loop. For anything else, call compose directly with
+the same two flags:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build bff
+docker compose -f docker-compose.prod.yml --env-file .env.production exec bff sh
+docker compose -f docker-compose.prod.yml --env-file .env.production down -v   # drop the redis volume too
+```
+
+### What the build actually does
+
+Every Dockerfile is multi-stage, and the dev stack stops at `dev` while this one
+builds through to `runner`:
+
+| Stage | What happens |
+| --- | --- |
+| `deps` | Copies only the root `package.json`, the lockfile and each workspace manifest, then `npm ci`. Nothing else — so this layer is reused on every build where no dependency changed. |
+| `builder` | Copies the source over `deps` and runs `next build` with `NODE_ENV=production`. `output: 'standalone'` makes Next trace which files each route actually imports and emit a self-contained tree with its own `server.js`. |
+| `runner` | Starts from a bare `node:22-alpine` and copies in only `.next/standalone`, `.next/static` and `public/`. No source, no `npm`, no dev dependencies. Runs as the unprivileged `node` user with `CMD ["node", "apps/<app>/server.js"]`. |
+
+### One image is Debian, three are Alpine
+
+[`apps/bff/Dockerfile`](apps/bff/Dockerfile) builds on `node:22-slim`; the three
+sub-apps stay on `node:22-alpine`. That is not an oversight.
+
+Alpine's musl `getaddrinfo`, asked for `login.microsoftonline.com` through
+Docker's embedded resolver, comes back with AAAA records only — dozens of IPv6
+addresses and not one IPv4. The container has no IPv6 route, so OIDC discovery
+fails with `ENETUNREACH` and `/api/auth/login` returns 500. glibc resolves the
+same name to both families with IPv4 first. `--dns-result-order=ipv4first` is
+not a fix: it reorders what `getaddrinfo` returned, and under musl there is no
+IPv4 entry to promote.
+
+Only the BFF talks to the internet, so only the BFF pays the ~50 MB. The
+sub-apps sit on the `internal` network with no route off the host and resolve
+nothing but container names, which the embedded DNS answers correctly.
+
+One consequence: `node:22-slim` ships neither `wget` nor `curl`, so the BFF's
+healthcheck in both compose files is a small `node -e` request instead.
+
+The build context is the **repo root** for all four apps — npm workspaces need
+the root lockfile and the shared `packages/*` to resolve anything — which is why
+each service in compose sets `context: .` with an explicit `dockerfile:`.
+
+Images are tagged `bff-starter/<app>:${IMAGE_TAG:-latest}`. Set `IMAGE_TAG` in
+`.env.production` if you want to push them somewhere and pin a version.
+
+### What differs from the dev stack
+
+- **No bind mounts, no `.next` volumes.** The image is the artifact; a code
+  change means a rebuild, not a hot reload.
+- **No fallback secrets.** `INTERNAL_JWT_SECRET` and `REDIS_PASSWORD` use
+  compose's `${VAR:?}` form, so the stack refuses to start rather than quietly
+  boot with the dev default.
+- **`AUTH_MODE` defaults to `oidc`** and `SESSION_COOKIE_NAME` to `__Host-sid`.
+- **`NODE_ENV=production` marks the session cookie `Secure`**, so the stack
+  needs HTTPS. Browsers make an exception for `http://localhost`, which is what
+  lets you smoke-test it locally.
+- **`PUBLIC_ORIGIN` decides what redirects point at.** Next's standalone server
+  builds absolute URLs from `HOSTNAME`, which must be `0.0.0.0` for the
+  container to bind every interface — so a redirect built from
+  `req.nextUrl.origin` sends the browser to `http://0.0.0.0:3000`, which
+  resolves nowhere. `next dev` binds localhost, so this only ever appears in a
+  container. [`publicOrigin()`](apps/bff/lib/redirects.ts) resolves it from
+  `PUBLIC_ORIGIN`, then `X-Forwarded-Host`, then `Host`.
+- **The published port binds to `127.0.0.1` by default.** What should be
+  reachable from the network is the TLS terminator in front of the stack, not
+  the app. `BFF_BIND=0.0.0.0` overrides that.
+- **Redis persists** (AOF, in a named volume) and requires a password. Point
+  `REDIS_URL` at a managed instance and delete the service if you'd rather not
+  run your own.
+- **Every service has a healthcheck and `restart: always`,** and the BFF waits
+  for all four to report healthy before it starts. The sub-apps answer `401` to
+  anything without an assertion, so their check is a small `node -e` request
+  that accepts any HTTP response rather than `wget --spider`, which wants a 2xx.
+- **Logs rotate** at 10 MB × 5 files instead of growing unbounded.
+
+This is still not a finished production deployment. It sets the right cookie
+name and a password on Redis, but TLS is not in the box, and items 2-4 of
+[Before production](#before-production) — certificate auth, an asymmetric
+internal token, a real Redis — are untouched.
 
 ---
 

@@ -72,15 +72,6 @@ dd {
   word-break: break-word;
 }
 
-ul.stub {
-  margin: 0;
-  padding-left: 1.125rem;
-  color: var(--muted);
-}
-
-ul.stub li {
-  margin: 0.25rem 0;
-}
 
 a.back {
   display: inline-block;
@@ -123,4 +114,12 @@ code {
 
 .button:hover {
   border-color: color-mix(in srgb, currentColor 45%, transparent);
+}
+
+.probe-output {
+  margin: 0.75rem 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8125rem;
 }

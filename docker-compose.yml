@@ -71,6 +71,7 @@ services:
       - ./apps/bff:/app/apps/bff
       - ./packages/internal-auth:/app/packages/internal-auth
       - ./packages/session-sync:/app/packages/session-sync
+      - ./packages/ui:/app/packages/ui
       # Keep build output inside the container: it's large, churns constantly,
       # and writing it back to a Windows/macOS bind mount is slow.
       - bff_next:/app/apps/bff/.next
@@ -89,7 +90,13 @@ services:
       - edge
       - internal
     healthcheck:
-      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3000/api/health']
+      # node, not wget: the bff image is debian-slim (see apps/bff/Dockerfile),
+      # which ships neither wget nor curl.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
       interval: 10s
       timeout: 3s
       retries: 5
@@ -107,6 +114,7 @@ services:
       - ./apps/connect:/app/apps/connect
       - ./packages/internal-auth:/app/packages/internal-auth
       - ./packages/session-sync:/app/packages/session-sync
+      - ./packages/ui:/app/packages/ui
       - connect_next:/app/apps/connect/.next
 
   iif:
@@ -121,6 +129,7 @@ services:
       - ./apps/iif:/app/apps/iif
       - ./packages/internal-auth:/app/packages/internal-auth
       - ./packages/session-sync:/app/packages/session-sync
+      - ./packages/ui:/app/packages/ui
       - iif_next:/app/apps/iif/.next
 
   handbook:
@@ -135,6 +144,7 @@ services:
       - ./apps/handbook:/app/apps/handbook
       - ./packages/internal-auth:/app/packages/internal-auth
       - ./packages/session-sync:/app/packages/session-sync
+      - ./packages/ui:/app/packages/ui
       - handbook_next:/app/apps/handbook/.next
 
 networks:

@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@bff/internal-auth": "0.1.0",
+    "@internal/ui": "*",
     "@bff/session-sync": "0.1.0",
     "ioredis": "5.4.1",
     "jose": "5.9.6",
@@ -20,7 +21,7 @@
     "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@types/node": "20.14.15",
+    "@types/node": "22.10.2",
     "@types/react": "18.3.5",
     "@types/react-dom": "18.3.0",
     "typescript": "5.5.4"

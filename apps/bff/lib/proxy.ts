@@ -9,6 +9,7 @@ import { internalJwtIssuer, internalJwtSecret, internalJwtTtlSeconds } from './e
 import { readSessionId } from './cookies';
 import { touchSession } from './session';
 import { upstreamFor } from './upstreams';
+import { publicOrigin } from './redirects';
 
 /**
  * Hop-by-hop headers plus the ones fetch() must compute for itself. Forwarding
@@ -62,7 +63,7 @@ export async function proxyToSubApp(req: NextRequest, audience: InternalAudience
   const session = await touchSession(readSessionId(req));
   if (!session) {
     if (wantsHtml(req)) {
-      const loginUrl = new URL('/api/auth/login', req.nextUrl.origin);
+      const loginUrl = new URL('/api/auth/login', publicOrigin(req));
       loginUrl.searchParams.set('returnTo', req.nextUrl.pathname + req.nextUrl.search);
       return NextResponse.redirect(loginUrl);
     }

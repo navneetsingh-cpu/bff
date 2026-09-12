@@ -1,19 +1,18 @@
 import { headers } from 'next/headers';
 import { AUDIENCE, verifyRequestIdentity } from '@/lib/identity';
 
+// Render on every request, never at build time. This page shows who is signed
+// in, so a cached copy would leak one person's identity to the next visitor.
 export const dynamic = 'force-dynamic';
 
-/**
- * Verifies the assertion a second time rather than trusting a header the
- * middleware could have set. It's a few microseconds of HMAC, and it keeps the
- * rule absolute: identity comes from the signed assertion, nowhere else.
- */
+// Who is calling? Only the BFF's signed assertion decides — never a cookie or
+// an X-User-* header, which the caller could fake. The middleware already
+// checked it; checking again is cheap and keeps this page safe on its own.
 export default async function IifPage() {
   const result = await verifyRequestIdentity(headers());
 
   if (!result.ok) {
-    // Unreachable in practice — middleware already 401s. Here so the page never
-    // has a code path that renders without a verified identity.
+    // Unreachable — middleware 401s first. Here so no path renders unverified.
     return (
       <main>
         <h1>Unauthorized</h1>
@@ -51,14 +50,6 @@ export default async function IifPage() {
           <dd>{claims.jti}</dd>
         </dl>
       </div>
-
-      <h2>Not built yet</h2>
-      <ul className="stub">
-        <li>New intake: requester details, category, attachments</li>
-        <li>Draft autosave and resume</li>
-        <li>Review queue and approval, gated on <code>iif.approver</code></li>
-        <li>Status timeline and audit trail per submission</li>
-      </ul>
 
       <a className="back" href="/">
         ← Back to the BFF
