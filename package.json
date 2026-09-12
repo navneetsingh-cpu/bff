@@ -1,0 +1,15 @@
+{
+  "name": "bff-monorepo",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "dev:bff": "pnpm --filter bff dev",
+    "dev:hr": "pnpm --filter app-hr dev",
+    "dev:ops": "pnpm --filter app-ops dev",
+    "build": "pnpm -r build",
+    "keys": "node scripts/gen-keys.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
