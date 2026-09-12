@@ -1,19 +1,36 @@
-import { z } from 'zod'
+/**
+ * Shared identity shapes. The BFF owns the session; sub-apps only ever see the
+ * subset of it that travels inside a signed internal assertion.
+ */
 
-/** Audience values: one per internal app. The BFF mints per-target tokens. */
-export const InternalAudience = z.enum(['app-hr', 'app-ops'])
-export type InternalAudience = z.infer<typeof InternalAudience>
+/** What the BFF keeps in Redis for a logged-in session. */
+export interface SessionRecord {
+  userId: string;
+  email: string;
+  name: string;
+  roles: string[];
+  /** Epoch milliseconds. Fixed at login; drives the absolute session cap. */
+  createdAt: number;
+  /** Epoch milliseconds. Bumped on every request; drives the idle timeout. */
+  lastSeenAt: number;
+}
 
-export const INTERNAL_ASSERTION_HEADER = 'x-internal-assertion'
-export const INTERNAL_ISSUER = 'bff'
-export const ASSERTION_TTL_SECONDS = 60
+/** The identity a sub-app is allowed to act on, after verifying the assertion. */
+export interface VerifiedIdentity {
+  sub: string;
+  email: string;
+  name: string;
+  roles: string[];
+}
 
-/** The only identity contract between the BFF and the internal apps. */
-export const InternalClaims = z.object({
-  /** Entra ID subject (pairwise, per app registration). */
-  sub: z.string().min(1),
-  /** Entra ID object id (stable across apps in the tenant). */
-  oid: z.string().min(1),
-  roles: z.array(z.string()).default([]),
-})
-export type InternalClaims = z.infer<typeof InternalClaims>
+/** Full decoded claim set of an internal assertion. */
+export interface InternalAssertionClaims extends VerifiedIdentity {
+  iss: string;
+  aud: string;
+  iat: number;
+  exp: number;
+  jti: string;
+}
+
+/** Audiences the BFF is allowed to mint assertions for. */
+export type InternalAudience = 'connect' | 'iif' | 'handbook';

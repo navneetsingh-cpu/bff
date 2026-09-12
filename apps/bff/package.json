@@ -1,25 +1,27 @@
 {
-  "name": "bff",
-  "version": "0.0.0",
+  "name": "@bff/bff",
+  "version": "0.1.0",
   "private": true,
+  "description": "Backend-for-frontend: owns the session, proxies the sub-apps, mints internal assertions.",
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "next dev --port 3000",
     "build": "next build",
-    "start": "next start -p 3000"
+    "start": "next start --port 3000",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@azure/msal-node": "^2.16.2",
-    "@internal/auth": "workspace:*",
-    "ioredis": "^5.4.1",
-    "next": "14.2.15",
+    "@bff/internal-auth": "0.1.0",
+    "ioredis": "5.4.1",
+    "jose": "5.9.6",
+    "next": "14.2.35",
+    "openid-client": "5.7.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "zod": "^3.23.8"
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@types/node": "^20.16.11",
-    "@types/react": "^18.3.11",
-    "@types/react-dom": "^18.3.0",
-    "typescript": "^5.6.3"
+    "@types/node": "20.14.15",
+    "@types/react": "18.3.5",
+    "@types/react-dom": "18.3.0",
+    "typescript": "5.5.4"
   }
 }

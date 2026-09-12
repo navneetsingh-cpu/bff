@@ -1,0 +1,25 @@
+{
+  "name": "@bff/iif",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Intake form workflow. Reachable only through the BFF.",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bff/internal-auth": "0.1.0",
+    "jose": "5.9.6",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.15",
+    "@types/react": "18.3.5",
+    "@types/react-dom": "18.3.0",
+    "typescript": "5.5.4"
+  }
+}

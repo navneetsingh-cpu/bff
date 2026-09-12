@@ -1,98 +1,149 @@
-name: bff
+name: bff-starter
 
-x-hardening: &hardening
-  read_only: true
-  tmpfs:
-    - /tmp:size=16m,mode=1777
-  security_opt:
-    - no-new-privileges:true
+# ---------------------------------------------------------------------------
+# Local development topology.
+#
+#   host :3000  ->  bff  ->  connect | iif | handbook
+#                     \
+#                      `->  redis
+#
+# `bff` is the only service with a published port. Everything else is reachable
+# only by container name on the `internal` network, so the sub-apps cannot be
+# hit directly from the host — the only way in is through the proxy, which is
+# the only thing that mints an assertion.
+# ---------------------------------------------------------------------------
+
+x-common-env: &common-env
+  NODE_ENV: development
+  INTERNAL_JWT_SECRET: ${INTERNAL_JWT_SECRET:-dev-only-not-a-real-secret-change-me}
+  INTERNAL_JWT_ISSUER: ${INTERNAL_JWT_ISSUER:-bff}
+  # Bind-mounted filesystems on Windows and macOS don't deliver inotify events
+  # reliably; polling is what makes hot reload actually work in the container.
+  WATCHPACK_POLLING: ${WATCHPACK_POLLING:-true}
+
+x-subapp: &subapp
   restart: unless-stopped
+  expose:
+    - '3000'
+  networks:
+    - internal
 
 services:
+  redis:
+    image: redis:7-alpine
+    # Sessions are disposable in dev; no persistence, no RDB snapshots on disk.
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    restart: unless-stopped
+    networks:
+      - internal
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   bff:
-    <<: *hardening
     build:
       context: .
       dockerfile: apps/bff/Dockerfile
-    # The only published port in the stack. Put TLS termination in front of it:
-    # __Host- cookies and Secure require HTTPS.
-    ports:
-      - "8080:3000"
+      target: dev
+    restart: unless-stopped
     environment:
-      NODE_ENV: production
-      AZURE_TENANT_ID: ${AZURE_TENANT_ID}
-      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
-      AZURE_CLIENT_CERT_PRIVATE_KEY: ${AZURE_CLIENT_CERT_PRIVATE_KEY}
-      AZURE_CLIENT_CERT_THUMBPRINT: ${AZURE_CLIENT_CERT_THUMBPRINT}
-      AZURE_SCOPES: ${AZURE_SCOPES}
-      BFF_PUBLIC_ORIGIN: ${BFF_PUBLIC_ORIGIN}
-      REDIRECT_URI: ${REDIRECT_URI}
-      POST_LOGOUT_REDIRECT_URI: ${POST_LOGOUT_REDIRECT_URI}
-      REDIS_URL: ${REDIS_URL}
-      SESSION_ENC_KEY: ${SESSION_ENC_KEY}
-      SESSION_IDLE_TTL_SECONDS: ${SESSION_IDLE_TTL_SECONDS}
-      SESSION_ABSOLUTE_TTL_SECONDS: ${SESSION_ABSOLUTE_TTL_SECONDS}
-      # Signing key stays on the BFF; the sub-apps only ever get the public half.
-      INTERNAL_JWT_PRIVATE_KEY: ${INTERNAL_JWT_PRIVATE_KEY}
-      INTERNAL_JWT_PUBLIC_KEY: ${INTERNAL_JWT_PUBLIC_KEY}
-      SPA_BASE_URL: ${SPA_BASE_URL}
-      DEV_INSECURE_COOKIE: ${DEV_INSECURE_COOKIE}
-      APP_HR_ORIGIN: http://app-hr:3000
-      APP_OPS_ORIGIN: http://app-ops:3000
-    networks:
-      - public
-      - internal
+      <<: *common-env
+      AUTH_MODE: ${AUTH_MODE:-stub}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-sid}
+      SESSION_IDLE_SECONDS: ${SESSION_IDLE_SECONDS:-1800}
+      SESSION_ABSOLUTE_SECONDS: ${SESSION_ABSOLUTE_SECONDS:-28800}
+      INTERNAL_JWT_TTL_SECONDS: ${INTERNAL_JWT_TTL_SECONDS:-60}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CONNECT_ORIGIN: http://connect:3000
+      IIF_ORIGIN: http://iif:3000
+      HANDBOOK_ORIGIN: http://handbook:3000
+      # Only read when AUTH_MODE=oidc. Blank in stub mode.
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      REDIRECT_URI: ${REDIRECT_URI:-http://localhost:3000/api/auth/callback}
+      OIDC_SCOPE: ${OIDC_SCOPE:-openid profile email}
+    ports:
+      - '${BFF_PORT:-3000}:3000'
+    volumes:
+      - ./apps/bff:/app/apps/bff
+      - ./packages/internal-auth:/app/packages/internal-auth
+      # Keep build output inside the container: it's large, churns constantly,
+      # and writing it back to a Windows/macOS bind mount is slow.
+      - bff_next:/app/apps/bff/.next
     depends_on:
       redis:
         condition: service_healthy
-      app-hr:
+      connect:
         condition: service_started
-      app-ops:
+      iif:
         condition: service_started
-
-  app-hr:
-    <<: *hardening
-    build:
-      context: .
-      dockerfile: apps/app-hr/Dockerfile
-    environment:
-      NODE_ENV: production
-      INTERNAL_JWT_PUBLIC_KEY: ${INTERNAL_JWT_PUBLIC_KEY}
+      handbook:
+        condition: service_started
     networks:
+      # `edge` carries the published port and outbound traffic (OIDC discovery
+      # to login.microsoftonline.com). `internal` is how it reaches the rest.
+      - edge
       - internal
-
-  app-ops:
-    <<: *hardening
-    build:
-      context: .
-      dockerfile: apps/app-ops/Dockerfile
-    environment:
-      NODE_ENV: production
-      INTERNAL_JWT_PUBLIC_KEY: ${INTERNAL_JWT_PUBLIC_KEY}
-    networks:
-      - internal
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--save", ""]
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-    volumes:
-      - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3000/api/health']
       interval: 10s
       timeout: 3s
       retries: 5
-    networks:
-      - internal
+      start_period: 40s
+
+  connect:
+    <<: *subapp
+    build:
+      context: .
+      dockerfile: apps/connect/Dockerfile
+      target: dev
+    environment:
+      <<: *common-env
+    volumes:
+      - ./apps/connect:/app/apps/connect
+      - ./packages/internal-auth:/app/packages/internal-auth
+      - connect_next:/app/apps/connect/.next
+
+  iif:
+    <<: *subapp
+    build:
+      context: .
+      dockerfile: apps/iif/Dockerfile
+      target: dev
+    environment:
+      <<: *common-env
+    volumes:
+      - ./apps/iif:/app/apps/iif
+      - ./packages/internal-auth:/app/packages/internal-auth
+      - iif_next:/app/apps/iif/.next
+
+  handbook:
+    <<: *subapp
+    build:
+      context: .
+      dockerfile: apps/handbook/Dockerfile
+      target: dev
+    environment:
+      <<: *common-env
+    volumes:
+      - ./apps/handbook:/app/apps/handbook
+      - ./packages/internal-auth:/app/packages/internal-auth
+      - handbook_next:/app/apps/handbook/.next
 
 networks:
-  public:
+  edge:
     driver: bridge
   internal:
+    driver: bridge
+    # No route off the host. Redis and the sub-apps have no reason to reach the
+    # internet, and nothing on the internet has a reason to reach them.
     internal: true
 
 volumes:
-  redis-data:
+  bff_next:
+  connect_next:
+  iif_next:
+  handbook_next:

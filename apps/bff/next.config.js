@@ -1,23 +1,38 @@
-const path = require('path')
+const path = require('path');
+
+/**
+ * Why there are no `rewrites()` here.
+ *
+ * The obvious shape for this file is:
+ *
+ *   rewrites: () => [
+ *     { source: '/connect/:path*',  destination: 'http://connect:3000/connect/:path*' },
+ *     { source: '/iif/:path*',      destination: 'http://iif:3000/iif/:path*' },
+ *     { source: '/handbook/:path*', destination: 'http://handbook:3000/handbook/:path*' },
+ *   ]
+ *
+ * Declarative rewrites can't do the one thing this proxy exists for: look the
+ * caller's session up in Redis and attach a freshly minted, per-request
+ * assertion. Middleware can add headers ahead of a rewrite, but middleware runs
+ * on the Edge runtime in Next 14, where ioredis can't run.
+ *
+ * So the same three routes are served by catch-all Route Handlers on the Node
+ * runtime instead — app/connect/[[...path]]/route.ts and friends. They proxy to
+ * exactly the destinations above (see lib/upstreams.ts), and additionally strip
+ * spoofed identity headers and mint X-Internal-Assertion. Same URL contract,
+ * same upstreams, one layer that can actually authenticate.
+ */
 
 /** @type {import('next').NextConfig} */
-module.exports = {
-  output: 'standalone',
+const nextConfig = {
   reactStrictMode: true,
-  poweredByHeader: false,
-  // Workspace packages are consumed from source.
-  transpilePackages: ['@internal/auth'],
-  // Required so standalone tracing picks up the pnpm workspace root.
+  output: 'standalone',
+  // Standalone builds in a workspace must trace from the monorepo root, or the
+  // hoisted node_modules are left out of the output.
   outputFileTracingRoot: path.join(__dirname, '../../'),
-  async rewrites() {
-    // Declarative fallback for internal app traffic. Note that the catch-all
-    // route handlers at src/app/hr/[...path] and src/app/ops/[...path] match
-    // first (afterFiles rewrites run after filesystem routes) and are what
-    // actually carries the X-Internal-Assertion. These entries exist so the
-    // routing table still resolves if the proxy routes are removed.
-    return [
-      { source: '/hr/:path*', destination: 'http://app-hr:3000/hr/:path*' },
-      { source: '/ops/:path*', destination: 'http://app-ops:3000/ops/:path*' },
-    ]
-  },
-}
+  // The shared package ships TypeScript source, so Next compiles it in-place.
+  transpilePackages: ['@bff/internal-auth'],
+  poweredByHeader: false,
+};
+
+module.exports = nextConfig;

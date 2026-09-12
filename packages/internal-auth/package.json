@@ -1,15 +1,20 @@
 {
-  "name": "@internal/auth",
-  "version": "0.0.0",
+  "name": "@bff/internal-auth",
+  "version": "0.1.0",
   "private": true,
-  "type": "module",
+  "description": "Mints and verifies the short-lived internal assertion JWT the BFF sends to sub-apps.",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
-    "jose": "^5.9.6",
-    "zod": "^3.23.8"
+    "jose": "5.9.6"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
   }
 }
