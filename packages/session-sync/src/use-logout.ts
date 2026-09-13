@@ -4,6 +4,23 @@ import { useCallback } from 'react';
 import { LOGOUT_PATH, SESSION_CHANNEL, type SessionLogoutMessage } from './contract';
 
 /**
+ * The `at` of the last sign-out this document broadcast.
+ *
+ * BroadcastChannel delivers a message to every *other* channel object with the
+ * same name — and that includes the one SessionSync holds in this same page.
+ * Without this, the page that starts a sign-out hears its own message and
+ * navigates to the signed-out page, cancelling its own form POST before the
+ * browser can follow the logout response's redirect. With LOGOUT_MODE=full that
+ * redirect is the trip to Entra, so Entra's session would silently survive.
+ */
+let lastBroadcastAt: number | null = null;
+
+/** True if this document sent `message`. SessionSync uses it to ignore its own broadcast. */
+export function isOwnBroadcast(message: SessionLogoutMessage): boolean {
+  return message.at === lastBroadcastAt;
+}
+
+/**
  * Tells every other tab on this origin that the user is signing out.
  *
  * Fire-and-forget and synchronous: `postMessage` queues the message before this
@@ -15,6 +32,7 @@ export function broadcastLogout(): void {
   try {
     const channel = new BroadcastChannel(SESSION_CHANNEL);
     const message: SessionLogoutMessage = { type: 'logout', at: Date.now() };
+    lastBroadcastAt = message.at;
     channel.postMessage(message);
     channel.close();
   } catch {

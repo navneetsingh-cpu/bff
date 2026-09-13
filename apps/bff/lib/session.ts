@@ -17,6 +17,8 @@ export interface NewSessionInput {
   email: string;
   name: string;
   roles: string[];
+  /** Only set by the OIDC callback when LOGOUT_MODE=full. */
+  idToken?: string;
 }
 
 /**
@@ -34,6 +36,7 @@ export async function createSession(user: NewSessionInput): Promise<string> {
     roles: user.roles,
     createdAt: now,
     lastSeenAt: now,
+    ...(user.idToken ? { idToken: user.idToken } : {}),
   };
 
   await getRedis().set(keyFor(sid), JSON.stringify(record), 'EX', sessionIdleSeconds());

@@ -40,6 +40,37 @@ export function authMode(): AuthMode {
  */
 export const sessionCookieName = (): string => read('SESSION_COOKIE_NAME', 'sid');
 
+export type LogoutMode = 'local' | 'full';
+
+/**
+ * What "Sign out" ends. Only read when AUTH_MODE=oidc — stub mode has no
+ * identity-provider session, so it never calls this.
+ *
+ *   local — this app's session only. The user stays signed in to Entra, and so
+ *           to every other Microsoft app in the browser.
+ *   full  — this app's session, then Entra's via its end_session_endpoint.
+ */
+export function logoutMode(): LogoutMode {
+  const mode = read('LOGOUT_MODE', 'local');
+  if (mode !== 'local' && mode !== 'full') {
+    throw new Error(`LOGOUT_MODE must be 'local' or 'full', got "${mode}"`);
+  }
+  return mode;
+}
+
+/**
+ * Adds prompt=login to the authorize request. A dev/demo aid for showing the
+ * sign-in flow repeatedly without ending the shared Entra session — not a
+ * production setting.
+ */
+export function forceLoginPrompt(): boolean {
+  const raw = read('FORCE_LOGIN_PROMPT', 'false');
+  if (raw !== 'true' && raw !== 'false') {
+    throw new Error(`FORCE_LOGIN_PROMPT must be 'true' or 'false', got "${raw}"`);
+  }
+  return raw === 'true';
+}
+
 /** Sliding window: a session dies this long after the last request. */
 export const sessionIdleSeconds = (): number => readInt('SESSION_IDLE_SECONDS', 30 * 60);
 

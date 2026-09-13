@@ -1,0 +1,26 @@
+Functionality:
+
+1. Single sign on: Sign in once at the BFF, and Connect, IIF and Handbook all know who you are.
+2. 3 apps in 1 repo:  They are linked with npm workspaces (`apps/*`, `packages/*`), so shared packages are imported like any other dependency.
+3. Logout all 3 from one:  All three share one server-side session, so deleting it once ends it everywhere
+4. Shared header
+
+Technical details:
+1. BFF , which means its like an api gateway but for front end: A single server handles sign-in and routing for the UI, so the browser never deals with tokens or the individual backends.
+2. it's TypeScript, and the sub-apps are React. one language across the whole stack.: `packages/internal-auth` do checks and imported everywhere
+3. Next js is technically a nodejs server that runs full stack app.4.  Highly secure in terms of attacks (refer md)
+5. Everything runs in a docker container 
+
+How it works:
+1. Bff server runs on localhost 3000, 
+2. All the rest apps are reverse proxied meaning they feel like they are on the same server but they aren't in reality
+3. No tokens stored in session or localstorage
+4. Only an HttpOnly cookie; Secure once TLS is in front. that acts as a key is stored which is also worthless if stolen
+5. When a user logs in redis creates and maintains a record until the session, it's a session store.
+6. Code is server compiled 
+7. Call entitlement api just like we do
+8. Environment secrets live in key vault
+9. SEO optimized for the Landing page and high performance 
+10. No cors as everything is on the same origin
+
+

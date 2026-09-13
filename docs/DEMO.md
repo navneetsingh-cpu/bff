@@ -4,6 +4,55 @@ A guided tour of this repo: what a backend-for-frontend is, how this one works, 
 
 ---
 
+## Overview
+
+### Functionality
+
+- **Single sign-on across all three apps.** Sign in once at the BFF, and Connect, IIF and Handbook all know who you are.
+- **Three apps and the BFF in one repo.** They are linked with npm workspaces (`apps/*`, `packages/*`), so shared packages are imported like any other dependency.
+- **Sign out of one, signed out of all three.** All three share one server-side session, so deleting it once ends it everywhere (§7).
+- **One shared header component.** `AppHeader` from `packages/ui` is rendered by all three apps and by the BFF's home page (§10).
+
+### Technical
+
+- **A BFF is an API gateway for one frontend.** A single server handles sign-in and routing for the UI, so the browser never deals with tokens or the individual backends.
+- **TypeScript end to end.** Server code, React components and shared packages use one language. Types such as `SessionRecord` and the assertion claims are defined once in `packages/internal-auth` and imported everywhere.
+- **Next.js is a Node server running a full-stack app.** Each container renders HTML, serves API routes (`app/api/**/route.ts`) and executes server components. The exception is middleware: Next 14 restricts it to the Edge runtime API, which can't load the Node Redis client, so session lookups live in route handlers (§4).
+- **Hardened against the common web attacks:** injected scripts, cross-site request forgery, clickjacking, open redirects and spoofed identity headers. See [§9](#9-security-what-helmetjs-does-and-what-this-adds) for how, and for the limits.
+- **Everything runs in Docker containers:** `bff`, `connect`, `iif`, `handbook` and `redis`. [docker-compose.yml](../docker-compose.yml) is for dev and [docker-compose.prod.yml](../docker-compose.prod.yml) is for production.
+
+### How it works
+
+- **The browser talks only to the BFF on `localhost:3000`.** It's the only service with a published port (§12).
+- **The three apps are reverse-proxied.** To the browser, `/connect`, `/iif` and `/handbook` are paths on one origin. In reality each is a separate container, reachable only on the internal Docker network (§4).
+- **Browser storage holds nothing.** Local Storage and Session Storage are empty: no tokens, no user profile, no session id.
+- **One `HttpOnly` cookie holds an opaque random id.** It's 32 random bytes with no meaning inside, and page scripts can't read it. A stolen copy is close to worthless: it only works when sent to this BFF, only while its Redis record exists, and deleting that record kills it at once.
+- **The cookie is `Secure` only in production.** The flag follows `NODE_ENV=production` ([env.ts:26](../apps/bff/lib/env.ts#L26)), and the production setup assumes a load balancer terminating TLS in front (§14). Dev sets `NODE_ENV=development` and serves plain HTTP, so it uses a plain `sid` cookie: `Secure` means HTTPS-only, and the `__Host-` name requires `Secure`.
+- **Login writes a session record to Redis.** It lasts until logout, 30 minutes without a request, or 8 hours after login, whichever comes first ([§5](#5-redis-and-session-lifecycle)).
+- **Server components run only on the server.** Their code stays out of the browser bundle, and only the rendered result is sent. Components marked `'use client'`, such as Connect's `EntitlementsProbe`, do ship to the browser.
+- **Entitlements are resolved on the server.** Connect's page calls the function directly in the same process:
+
+  [apps/connect/app/page.tsx:36-37](../apps/connect/app/page.tsx#L36-L37)
+  ```tsx
+    // Direct call, not HTTP — the route handler runs in this same process.
+    const entitlements = await getEntitlements(claims);
+  ```
+  The same data is also served over HTTP at [apps/connect/app/api/entitlements/route.ts](../apps/connect/app/api/entitlements/route.ts) (§11). A browser call to it goes through the BFF like any other request:
+
+  [apps/connect/app/entitlements-probe.tsx:23-27](../apps/connect/app/entitlements-probe.tsx#L23-L27)
+  ```tsx
+        const response = await fetch('/connect/api/entitlements', {
+          headers: { accept: 'application/json' },
+          // The BFF needs the session cookie to mint an assertion for this call.
+          credentials: 'same-origin',
+        });
+  ```
+- **Secrets never go into the image.** Locally they live in `.env`, which is gitignored and excluded from builds by `.dockerignore`. The Azure target, which isn't in this repo yet, is Key Vault: each container app reads its secrets using its managed identity, with no credential stored anywhere (§15).
+- **SSR sends real HTML,** so first paint doesn't wait for JavaScript to download and run. On SEO: all three apps are behind sign-in and are never crawled, so SEO only matters if a public zone is added later (§18).
+- **No CORS configuration is needed.** CORS only applies when a page calls a different origin. Every request here goes to the origin the page came from, and the BFF forwards it server to server. What removes the need is the single origin, not the fact that code runs on a server.
+
+---
+
 ## 1. What a BFF is
 
 A BFF is a small server between the browser and everything else. It signs the user in and holds the credentials. The browser gets a cookie, never a token.
@@ -179,11 +228,15 @@ Without this, Connect's pages would ask for their JavaScript and CSS at `/_next/
 
 ---
 
-## 5. Redis: what it is and why it's here
+## 5. Redis and session lifecycle
 
-Redis is an in-memory key-value store where each key can expire. Here it's the session store.
+Redis is an in-memory key-value store: a value is stored under a string key, and each key can have an expiry. Here it's the **session store**, not a cache. A cache can lose data harmlessly because the data can be rebuilt from its source. A session store has no source, so losing a key signs that user out. The eviction policy (what Redis deletes when memory fills up) has to match. Neither compose file sets `maxmemory-policy`, so Redis uses its default, `noeviction`: when memory is full, new writes fail rather than existing sessions being dropped. Managed Redis can default to something else. Azure Cache for Redis uses `volatile-lru`, which evicts keys that have an expiry, and every session key has one. Set `noeviction` explicitly there.
 
-[packages/internal-auth/src/types.ts:7-16](../packages/internal-auth/src/types.ts#L7-L16)
+### What's stored
+
+There's one key per signed-in browser, `sess:<sid>`, where `<sid>` is the cookie value. The value is a JSON string of this shape:
+
+[packages/internal-auth/src/types.ts:7-23](../packages/internal-auth/src/types.ts#L7-L23)
 ```ts
 export interface SessionRecord {
   userId: string;
@@ -194,23 +247,123 @@ export interface SessionRecord {
   createdAt: number;
   /** Epoch milliseconds. Bumped on every request; drives the idle timeout. */
   lastSeenAt: number;
+  /**
+   * The raw Entra ID token. Only stored when AUTH_MODE=oidc and
+   * LOGOUT_MODE=full, where sign-out sends it back to Entra as `id_token_hint`.
+   * It never leaves the BFF: nothing forwards the whole record, and it is not
+   * part of the internal assertion.
+   */
+  idToken?: string;
 }
 ```
 
-The record stays server-side, so the user can't tamper with it and one `DEL` revokes it. Every request resets the 30 min idle window, and there's a hard 8 h cap from login:
+Signing in as the stub user Ada Lovelace writes this. Your id and timestamps will differ.
 
-[apps/bff/lib/session.ts:65-73](../apps/bff/lib/session.ts#L65-L73)
-```ts
-  const now = Date.now();
-  if (now - record.createdAt > sessionAbsoluteSeconds() * 1000) {
-    await redis.del(keyFor(sid));
-    return null;
-  }
-
-  record.lastSeenAt = now;
-  await redis.set(keyFor(sid), JSON.stringify(record), 'EX', sessionIdleSeconds());
-  return record;
 ```
+key:    sess:q3Vt9sZc1xK0bJ7mR2wLpE8nYhA4dF6gT5uI0oPzXcM
+value:  {"userId":"u-1001","email":"ada.lovelace@example.test","name":"Ada Lovelace","roles":["employee","handbook.reader"],"createdAt":1789290000000,"lastSeenAt":1789290252000}
+expiry: 1800 seconds, reset on every request that touches the session
+```
+
+In OIDC mode, `userId` is the Entra object id and `roles` comes from the ID token's `roles` claim. No access or refresh token is stored. The raw ID token is stored, as `idToken`, only when `LOGOUT_MODE=full`, for the sign-out redirect (§7).
+
+**Not encrypted.** The app writes plain JSON, so `redis-cli` shows readable text, not binary. The record holds a name, an email and roles, and no access or refresh token. With `LOGOUT_MODE=full` it also holds the ID token, which isn't meant for calling APIs but should still be treated as sensitive. Redis is only reachable on the internal network. Anyone with Redis access can still see who is signed in. Production Redis also writes records to disk (`--appendonly yes`), where only disk-level encryption protects them. If tokens are ever stored for refresh (§6), encrypt the value before writing it.
+
+### Where the code touches it
+
+**Created in the OIDC callback, after the code exchange.** Once `client.callback` has swapped the code for tokens and validated the ID token, the callback deletes any session the browser already had, writes a new one, and sets its id as the cookie. Stub mode does the same in [stub.ts:96](../apps/bff/lib/auth/stub.ts#L96).
+
+[apps/bff/lib/auth/oidc.ts:166-176](../apps/bff/lib/auth/oidc.ts#L166-L176)
+```ts
+      const user = sessionFrom(claims);
+      if (!user) return fail('ID token is missing sub or an email claim.', 401);
+
+      // Kept only when sign-out will send it back to Entra as id_token_hint.
+      // In LOGOUT_MODE=local nothing would ever read it, so it isn't stored.
+      if (keepIdToken && tokenSet.id_token) user.idToken = tokenSet.id_token;
+
+      const sid = await rotateSessionOnLogin(readSessionId(req), user);
+
+      const res = NextResponse.redirect(new URL(returnTo, publicOrigin(req)), { status: 303 });
+      setSessionCookie(res, sid);
+```
+
+**The session module, [apps/bff/lib/session.ts](../apps/bff/lib/session.ts):**
+- **`createSession`** ([L28](../apps/bff/lib/session.ts#L28)) generates the id and writes the record with a 30-minute expiry.
+  ```ts
+    await getRedis().set(keyFor(sid), JSON.stringify(record), 'EX', sessionIdleSeconds());
+  ```
+- **`touchSession`** ([L53](../apps/bff/lib/session.ts#L53)) reads the record. If it's more than 8 hours old it's deleted; otherwise it's written back, which resets the 30-minute expiry.
+  ```ts
+    const now = Date.now();
+    if (now - record.createdAt > sessionAbsoluteSeconds() * 1000) {
+      await redis.del(keyFor(sid));
+      return null;
+    }
+
+    record.lastSeenAt = now;
+    await redis.set(keyFor(sid), JSON.stringify(record), 'EX', sessionIdleSeconds());
+  ```
+- **`peekSession`** ([L80](../apps/bff/lib/session.ts#L80)) reads without resetting the expiry. The BFF's layout uses it to render the header, which shouldn't count as activity.
+- **`destroySession`** ([L91](../apps/bff/lib/session.ts#L91)) deletes the key.
+- **`rotateSessionOnLogin`** ([L137](../apps/bff/lib/session.ts#L137)) destroys the old session, then creates a new one, so an id planted in the browser before login is useless after it.
+
+**Read on each request, in the proxy route handlers rather than the middleware.** Middleware runs on the Edge runtime, which can't load the Redis client (§4). So every `/connect`, `/iif` and `/handbook` route handler calls `proxyToSubApp`, which looks up the session before forwarding anything. `/api/auth/me` calls `touchSession` too.
+
+[apps/bff/lib/proxy.ts:63-71](../apps/bff/lib/proxy.ts#L63-L71)
+```ts
+  const session = await touchSession(readSessionId(req));
+  if (!session) {
+    if (wantsHtml(req)) {
+      const loginUrl = new URL('/api/auth/login', publicOrigin(req));
+      loginUrl.searchParams.set('returnTo', req.nextUrl.pathname + req.nextUrl.search);
+      return NextResponse.redirect(loginUrl);
+    }
+    return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+  }
+```
+
+**Deleted in the logout route.** `POST /api/auth/logout` calls `destroySession(sid)` before building any response, so the id is dead even if the browser ignores the response ([route.ts:42](../apps/bff/app/api/auth/logout/route.ts#L42), excerpt in §7).
+
+### Seeing the session in Redis
+
+Open a Redis shell inside the container. Use the command that matches the stack you started:
+
+```
+# dev (npm run up:dev)
+docker compose exec redis redis-cli
+
+# production (npm run up:prod)
+docker compose -f docker-compose.prod.yml --env-file .env.production exec redis redis-cli
+```
+
+A plain `docker compose` only reads `docker-compose.yml`. The production file is a separate Compose project, `bff-starter-prod`, so without `-f` Compose reports `service "redis" is not running`. The `--env-file` is needed because the production file refuses to load without its required variables. No password prompt appears in either case: dev Redis has no password, and in production the container's `REDISCLI_AUTH` variable supplies it.
+
+| Command | What to point at |
+| --- | --- |
+| `KEYS sess:*` | One key per signed-in browser. The part after `sess:` matches the `sid` cookie in DevTools. Sign in from a second browser profile and a second key appears. |
+| `GET sess:<id>` | The record as readable JSON, with no token in it. Load a page and run it again: `lastSeenAt` has moved. |
+| `TTL sess:<id>` | Seconds until Redis deletes the key. It counts down from 1800, and loading `/connect` puts it back to 1800. `-2` means the key is gone. |
+| `MONITOR` | Every command as Redis runs it. Load `/connect` and watch a `get` followed by a `set … EX 1800` for the same key. Press Ctrl+C to stop. `MONITOR` slows Redis down, so use it for the demo only. |
+
+```
+127.0.0.1:6379> KEYS sess:*
+1) "sess:q3Vt9sZc1xK0bJ7mR2wLpE8nYhA4dF6gT5uI0oPzXcM"
+127.0.0.1:6379> GET sess:q3Vt9sZc1xK0bJ7mR2wLpE8nYhA4dF6gT5uI0oPzXcM
+"{\"userId\":\"u-1001\",\"email\":\"ada.lovelace@example.test\",\"name\":\"Ada Lovelace\",\"roles\":[\"employee\",\"handbook.reader\"],\"createdAt\":1789290000000,\"lastSeenAt\":1789290252000}"
+127.0.0.1:6379> TTL sess:q3Vt9sZc1xK0bJ7mR2wLpE8nYhA4dF6gT5uI0oPzXcM
+(integer) 1794
+```
+
+The backslashes are `redis-cli` escaping the quotes for display. They aren't in the stored value.
+
+**`KEYS` is for the demo only.** It walks every key in one go, and Redis runs one command at a time, so every sign-in and page load waits until it finishes. In production, use `SCAN 0 MATCH sess:* COUNT 100`, which returns keys in small batches.
+
+### Prove it: sign-out deletes the record
+
+1. Run `KEYS sess:*`. You'll see one key for this browser.
+2. Click **Sign out** in the browser.
+3. Run `KEYS sess:*` again. You'll see `(empty array)`, or only other browsers' keys. A copy of the old cookie value now resolves to nothing.
 
 **Single point of failure:** if Redis is down, nobody is signed in. A few-second in-process cache in `touchSession` would save round trips, but sign-out would lag by that long.
 
@@ -218,9 +371,9 @@ The record stays server-side, so the user can't tamper with it and one `DEL` rev
 
 ## 6. Token expiry and refresh
 
-**Not built.** The BFF keeps the ID token's claims and discards the tokens:
+**Not built.** The BFF keeps the ID token's claims and discards the tokens. The one exception is the raw ID token when `LOGOUT_MODE=full`, which is used only for sign-out (§7):
 
-[apps/bff/lib/auth/oidc.ts:153-163](../apps/bff/lib/auth/oidc.ts#L153-L163)
+[apps/bff/lib/auth/oidc.ts:159-173](../apps/bff/lib/auth/oidc.ts#L159-L173)
 ```ts
       const claims = tokenSet.claims();
 
@@ -231,6 +384,10 @@ The record stays server-side, so the user can't tamper with it and one `DEL` rev
 
       const user = sessionFrom(claims);
       if (!user) return fail('ID token is missing sub or an email claim.', 401);
+
+      // Kept only when sign-out will send it back to Entra as id_token_hint.
+      // In LOGOUT_MODE=local nothing would ever read it, so it isn't stored.
+      if (keepIdToken && tokenSet.id_token) user.idToken = tokenSet.id_token;
 
       const sid = await rotateSessionOnLogin(readSessionId(req), user);
 ```
@@ -248,7 +405,7 @@ The design, once the BFF calls APIs as the user:
 
 **Server:** one `DEL` kills the session for every tab and every zone.
 
-[apps/bff/app/api/auth/logout/route.ts:34-37](../apps/bff/app/api/auth/logout/route.ts#L34-L37)
+[apps/bff/app/api/auth/logout/route.ts:39-42](../apps/bff/app/api/auth/logout/route.ts#L39-L42)
 ```ts
   // DEL sess:<sid>. From this point the session id is meaningless: any request
   // that still carries the cookie will fail to resolve and be treated as signed
@@ -258,19 +415,26 @@ The design, once the BFF calls APIs as the user:
 
 **UX:** `BroadcastChannel`. All zones share the origin, so every tab hears it.
 
-[packages/session-sync/src/use-logout.ts:15-19](../packages/session-sync/src/use-logout.ts#L15-L19)
+[packages/session-sync/src/use-logout.ts:32-37](../packages/session-sync/src/use-logout.ts#L32-L37)
 ```ts
   try {
     const channel = new BroadcastChannel(SESSION_CHANNEL);
     const message: SessionLogoutMessage = { type: 'logout', at: Date.now() };
+    lastBroadcastAt = message.at;
     channel.postMessage(message);
     channel.close();
 ```
 
-[packages/session-sync/src/session-sync.tsx:35-44](../packages/session-sync/src/session-sync.tsx#L35-L44)
+[packages/session-sync/src/session-sync.tsx:36-51](../packages/session-sync/src/session-sync.tsx#L36-L51)
 ```ts
     channel.onmessage = (event: MessageEvent<unknown>) => {
       if (!isLogoutMessage(event.data)) return;
+
+      // This page started the sign-out, and its own form POST is already
+      // navigating — to the signed-out page, or to Entra first with
+      // LOGOUT_MODE=full. A replace() here would cancel that navigation before
+      // the logout response's redirect is followed.
+      if (isOwnBroadcast(event.data)) return;
 
       // Already on the confirmation page — redirecting again would loop.
       if (window.location.pathname === LOGGED_OUT_PATH) return;
@@ -285,19 +449,54 @@ The design, once the BFF calls APIs as the user:
 
 **It can't reach:** other browsers, other devices, other origins. Their sessions time out on their own.
 
-**External SPA:** the BFF redirects to Entra's `end_session_endpoint`:
+### Signing out: local vs full
 
-[apps/bff/lib/auth/oidc.ts:184-189](../apps/bff/lib/auth/oidc.ts#L184-L189)
+A signed-in user has two separate sessions:
+
+- **Ours:** the `sess:<sid>` record in Redis, and the `sid` cookie that points at it. It gets them into Connect, IIF and Handbook.
+- **Microsoft's:** a cookie on `login.microsoftonline.com`. It lets Entra sign them in again without a password, here and in every other Microsoft app in that browser.
+
+Sign-out always ends ours first. `LOGOUT_MODE` decides whether it ends Microsoft's too. It's only read when `AUTH_MODE=oidc`; stub mode has no Microsoft session and ignores it.
+
+| `LOGOUT_MODE` | Ends our session | Ends Microsoft's session | Next **Sign in** |
+| --- | --- | --- | --- |
+| `local` (default) | Yes | No | Returns straight away, no prompt |
+| `full` | Yes | Yes | Asks for credentials |
+
+In `full` mode, the logout response redirects to Entra's `end_session_endpoint`, taken from the discovery document:
+
+[apps/bff/lib/auth/oidc.ts:193-209](../apps/bff/lib/auth/oidc.ts#L193-L209)
 ```ts
+      if (logoutMode() === 'local') return loggedOut;
+
+      // full: end the Entra session too, so the next sign-in asks for
+      // credentials. That also signs the user out of every other Microsoft app
+      // in this browser. The endpoint comes from the discovery document.
       const client = await getClient();
 
-      // `post_logout_redirect_uri` has to be registered on the app
-      // registration, exactly as sent, or Entra drops the user on its own page
-      // instead of bringing them back here.
-      return client.endSessionUrl({ post_logout_redirect_uri: loggedOut });
+      return client.endSessionUrl({
+        // Has to match a redirect URI on the app registration, exactly as sent,
+        // or Entra leaves the user on its own signed-out page instead of
+        // bringing them back here.
+        post_logout_redirect_uri: loggedOut,
+        // Tells Entra which account is signing out, so it can skip the account
+        // picker. Absent for a session created while LOGOUT_MODE=local; the
+        // library drops the parameter when it's undefined.
+        id_token_hint: session?.idToken,
+      });
 ```
 
-Entra's front-channel logout loads each app's logout URL in a third-party iframe, so it's best-effort.
+- **Order.** The redirect goes out on the same response that clears our cookie, after the Redis `DEL`. If the user closes the tab on Microsoft's page, our session is already gone.
+- **`id_token_hint`.** This is why `full` mode stores the ID token (§5). A session created under `local` has none, so Entra may ask which account to sign out.
+- **Registration.** `/api/auth/logged-out` must be registered on the app registration, or Entra won't send the user back. See [Switching to real login](../README.md#switching-to-real-login).
+- **CSP.** The BFF's `form-action` allows `https://login.microsoftonline.com`. Browsers apply `form-action` to every redirect a form submission follows, so with only `'self'` the hop to Entra is blocked. The only sign of it is a console error, and Microsoft's session survives.
+- **Other apps.** Entra's front-channel logout loads each app's logout URL in a third-party iframe, so it's best-effort.
+
+**The tradeoff.** Microsoft's session is shared, so `full` also signs the user out of Teams, Outlook and the Azure portal in that browser. That's correct for a sensitive app, where "signed out" has to mean nobody gets back in without a password. It's usually wrong for an internal portal: people don't expect leaving one app to sign them out of Teams.
+
+To show the Microsoft login screen repeatedly in a demo without using `full`, set `FORCE_LOGIN_PROMPT=true`. Sign-in then sends `prompt=login`, which asks for credentials for this app only. It's a demo aid, not a production setting.
+
+**Verify:** after signing out, run `docker compose exec redis redis-cli KEYS "sess:*"` (or `npm run redis:keys` for the production stack). This browser's key is gone in both modes, whatever Entra does.
 
 ---
 
@@ -316,7 +515,7 @@ Entra's front-channel logout loads each app's logout URL in a third-party iframe
 
 ## 9. Security: what helmet.js does, and what this adds
 
-[apps/bff/middleware.ts:51-56](../apps/bff/middleware.ts#L51-L56)
+[apps/bff/middleware.ts:55-60](../apps/bff/middleware.ts#L55-L60)
 ```ts
 function applySecurityHeaders(headers: Headers): void {
   headers.set('x-content-type-options', 'nosniff');
@@ -334,7 +533,7 @@ function applySecurityHeaders(headers: Headers): void {
 | `Referrer-Policy` | Full URLs leaking to other sites |
 | `Permissions-Policy` | Scripts requesting the camera, microphone or location |
 
-[apps/bff/middleware.ts:80-91](../apps/bff/middleware.ts#L80-L91)
+[apps/bff/middleware.ts:84-95](../apps/bff/middleware.ts#L84-L95)
 ```ts
   const nonce = generateNonce();
   const csp = contentSecurityPolicy(nonce, process.env.NODE_ENV !== 'production');
@@ -656,7 +855,7 @@ Locally the app runs over plain HTTP, so `Secure` and HSTS are never exercised.
 
 **Prefer a certificate for Entra.** Client secrets expire and break production without warning.
 
-[apps/bff/lib/auth/oidc.ts:39-40](../apps/bff/lib/auth/oidc.ts#L39-L40)
+[apps/bff/lib/auth/oidc.ts:40-41](../apps/bff/lib/auth/oidc.ts#L40-L41)
 ```ts
         // Swap for 'private_key_jwt' when moving to a certificate credential.
         token_endpoint_auth_method: 'client_secret_post',
@@ -721,7 +920,7 @@ export default async function HandbookPage() {
 
 **Before you start:**
 - Set `AUTH_MODE=oidc` and the `AZURE_*` values in `.env`.
-- In the Entra app registration, register `http://localhost:3000/api/auth/callback` as a redirect URI and `http://localhost:3000/api/auth/logged-out` as a post-logout redirect URI.
+- In the Entra app registration, register `http://localhost:3000/api/auth/callback` as a redirect URI. For `LOGOUT_MODE=full`, also register `http://localhost:3000/api/auth/logged-out` in the same Web redirect URI list; Entra checks the post-logout redirect against it.
 - Run `docker compose up --build` once. The first build takes a few minutes.
 - Add the Entra object ids of the accounts you'll use to [`MOCK_ENTITLEMENTS`](../apps/connect/lib/entitlements.ts#L102). The map is keyed by seeded ids, so any other account gets zero permissions.
 - To compare two users, sign in as the second account in a separate browser profile.
@@ -739,6 +938,6 @@ export default async function HandbookPage() {
 | 7 | Click the legacy SPA link | A brief flash of `login.microsoftonline.com`, then signed in | No prompt; the `prompt=none` redirect did the work |
 | 8 | Open `/connect` and `/handbook` in two tabs, then **Sign out** in one | The other tab moves to the signed-out page | One Redis `DEL` ends the session; the broadcast just updates the other tabs |
 
-Do step 7 before step 8. Signing out also ends the Microsoft session, which the SPA sign-in depends on. Entra may show an account picker during sign-out, because no `id_token_hint` is sent.
+With the default `LOGOUT_MODE=local`, step 8 leaves the Microsoft session alone, so step 7 still works afterwards. With `LOGOUT_MODE=full`, do step 7 before step 8: signing out ends the Microsoft session, which the SPA sign-in depends on. See [Signing out: local vs full](#signing-out-local-vs-full).
 
 

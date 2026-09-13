@@ -207,8 +207,10 @@ The **Sign out** button is in the header of every app. Pressing it:
    and nowhere else.
 4. Redirects to `/api/auth/logged-out`, a public page that does no session
    lookup, so it renders fine for someone who has just had theirs destroyed.
-   With `AUTH_MODE=oidc` it detours via Entra's sign-out endpoint first, so you
-   aren't silently signed back in on the next attempt.
+   With `AUTH_MODE=oidc` and `LOGOUT_MODE=full` it goes via Entra's sign-out
+   endpoint first, so the next sign-in asks for credentials. The default,
+   `LOGOUT_MODE=local`, leaves the Microsoft session alone — see
+   [Signing out: local vs full](docs/DEMO.md#signing-out-local-vs-full).
 
 Meanwhile, every other tab that got the broadcast redirects itself to the same
 confirmation page. **Try it:** open `/connect` and `/handbook` in two tabs, sign
@@ -250,6 +252,8 @@ Copy `.env.example` to `.env` and edit. Every variable has a working default in
 | `AZURE_CLIENT_SECRET` | *(blank)* | Entra client secret. |
 | `REDIRECT_URI` | `http://localhost:3000/api/auth/callback` | Where Entra sends you back. Must match the app registration exactly. |
 | `OIDC_SCOPE` | `openid profile email` | What to ask Entra for. |
+| `LOGOUT_MODE` | `local` | What sign-out ends when `AUTH_MODE=oidc`. `local` = this app's session only; the user stays signed in to Microsoft and its other apps. `full` = the Entra session too, so the next sign-in asks for credentials, but that also signs the user out of Teams, Outlook and the rest in that browser. Ignored in stub mode. |
+| `FORCE_LOGIN_PROMPT` | `false` | `true` sends `prompt=login`, so Entra asks for credentials for this app every time without ending the Microsoft session. A dev/demo aid, not a production setting. |
 | `WATCHPACK_POLLING` | `true` | Poll the filesystem for changes. Needed for hot reload on Windows and macOS bind mounts; set `false` on Linux for lower idle CPU. |
 | `ENTITLEMENTS_SOURCE` | `mock` | Where the Connect app resolves permissions from. `mock` = hardcoded map, no network. `api` = a real service. |
 | `ENTITLEMENTS_API_URL` | *(blank)* | Base URL of that service. Only read when `ENTITLEMENTS_SOURCE=api`, and required then. |
@@ -370,7 +374,26 @@ REDIRECT_URI=http://localhost:3000/api/auth/callback
 ```
 
 Add that same `REDIRECT_URI` to the registration's **Web** redirect URIs — it has
-to match character for character. Then `docker compose up -d bff`.
+to match character for character.
+
+**For `LOGOUT_MODE=full`, also register the post-logout redirect URI.** Full
+sign-out sends Entra a `post_logout_redirect_uri`, and Entra only sends the user
+back to a URI registered on the app. For a Web app that means the same list as
+the callback: **Authentication → Web → Redirect URIs**.
+
+| Environment | Post-logout redirect URI |
+| --- | --- |
+| Local | `http://localhost:3000/api/auth/logged-out` |
+| Production | `https://<your-host>/api/auth/logged-out` (your `PUBLIC_ORIGIN` followed by `/api/auth/logged-out`) |
+
+It has to match exactly, like the callback. If it's missing, Entra still ends
+its session but leaves the user on Microsoft's own signed-out page instead of
+bringing them back. The **Front-channel logout URL** field on the same blade is a
+different setting: it's how Entra tells *this* app that the user signed out
+somewhere else, and it doesn't make the redirect back work. `LOGOUT_MODE=local`
+never calls Entra on sign-out, so it needs neither.
+
+Then `docker compose up -d bff`.
 
 `/api/auth/login` now redirects to Microsoft instead of showing the user picker.
 Nothing downstream changes: both modes implement the same
@@ -405,6 +428,33 @@ the same two flags:
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build bff
 docker compose -f docker-compose.prod.yml --env-file .env.production exec bff sh
 docker compose -f docker-compose.prod.yml --env-file .env.production down -v   # drop the redis volume too
+```
+
+### Working with the running stack
+
+These scripts all pass `-f docker-compose.prod.yml --env-file .env.production`,
+so they act on the production containers and behave the same in PowerShell, cmd
+and bash. None of them builds anything. `up` uses `--no-build` and fails if the
+images don't exist yet, so run `npm run up:prod` once first. The dev stack's
+equivalents are `up:dev`, `down:dev` and `logs:dev`.
+
+```bash
+npm run ps              # which containers are up, and whether they're healthy
+npm run up              # start the existing images detached, without rebuilding
+npm run down            # stop and remove the containers (the redis volume survives)
+npm run restart         # restart every container in place (.env.production edits need down + up)
+
+npm run logs            # follow all five services, interleaved
+npm run logs:bff        # follow the BFF: sign-in, sessions, proxying to sub-apps
+npm run logs:connect    # follow Connect only
+npm run logs:iif        # follow IIF only
+npm run logs:handbook   # follow Handbook only
+
+npm run redis           # interactive redis-cli, for GET / TTL on a single session
+npm run redis:keys      # list session keys (sess:*), one per signed-in browser
+npm run redis:watch     # stream every command Redis runs, session JSON indented; Ctrl+C to stop, demo use only
+npm run redis:watch:raw # the same stream exactly as redis-cli prints it
+npm run redis:flush     # FLUSHDB: delete every session and log everyone out between demo runs
 ```
 
 ### What the build actually does

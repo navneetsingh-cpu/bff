@@ -109,7 +109,7 @@ export const stubProvider: AuthProvider = {
 
   async buildLogoutRedirect(req: NextRequest): Promise<string> {
     // No identity provider in the picture, so destroying the local session is
-    // the whole of sign-out.
+    // the whole of sign-out. LOGOUT_MODE is deliberately never read here.
     return new URL(LOGGED_OUT_PATH, publicOrigin(req)).toString();
   },
 };

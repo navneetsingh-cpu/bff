@@ -117,6 +117,8 @@ services:
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
       REDIRECT_URI: ${REDIRECT_URI:-}
       OIDC_SCOPE: ${OIDC_SCOPE:-openid profile email}
+      LOGOUT_MODE: ${LOGOUT_MODE:-local} # local = this app only, full = end the Entra session too
+      FORCE_LOGIN_PROMPT: ${FORCE_LOGIN_PROMPT:-false} # dev/demo aid, leave false
     ports:
       # Only listens on localhost by default - the HTTPS load balancer in front
       # should be the public one, not this app.

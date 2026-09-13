@@ -41,7 +41,11 @@ function contentSecurityPolicy(nonce: string, isDev: boolean): string {
     `img-src 'self' data: blob:`,
     `font-src 'self'`,
     `connect-src 'self'`,
-    `form-action 'self'`,
+    // The sign-out form posts to 'self', but with LOGOUT_MODE=full the response
+    // redirects to Entra's logout endpoint. Browsers apply form-action to every
+    // redirect a form submission follows, so without Entra's host that hop is
+    // blocked and the Entra session silently survives.
+    `form-action 'self' https://login.microsoftonline.com`,
     `base-uri 'self'`,
     `object-src 'none'`,
     `frame-ancestors 'none'`,

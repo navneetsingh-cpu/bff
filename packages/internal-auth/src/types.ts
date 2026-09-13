@@ -13,6 +13,13 @@ export interface SessionRecord {
   createdAt: number;
   /** Epoch milliseconds. Bumped on every request; drives the idle timeout. */
   lastSeenAt: number;
+  /**
+   * The raw Entra ID token. Only stored when AUTH_MODE=oidc and
+   * LOGOUT_MODE=full, where sign-out sends it back to Entra as `id_token_hint`.
+   * It never leaves the BFF: nothing forwards the whole record, and it is not
+   * part of the internal assertion.
+   */
+  idToken?: string;
 }
 
 /** The identity a sub-app is allowed to act on, after verifying the assertion. */

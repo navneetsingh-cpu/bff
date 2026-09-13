@@ -165,11 +165,12 @@ Three things happen alongside it, and none of them are load-bearing:
   asks the browser to drop its cache, its cookies, and localStorage /
   sessionStorage / IndexedDB for this origin. This is sent on the logout route
   and nowhere else — on any other route it would wipe state the app needs.
-- When `AUTH_MODE=oidc`, the browser is then sent to Entra's
-  `end_session_endpoint`. This matters more than it looks: without it, the user
-  still has a live sign-in session *with Microsoft*, so clicking "sign in" again
-  would put them straight back in with no prompt. To a user, that does not look
-  like they were ever signed out.
+- When `AUTH_MODE=oidc` and `LOGOUT_MODE=full`, the browser is then sent to
+  Entra's `end_session_endpoint`. Without it, the user still has a live sign-in
+  session *with Microsoft*, so clicking "sign in" again puts them straight back
+  in with no prompt. The catch is that the Microsoft session is shared: ending
+  it also signs them out of Teams, Outlook and every other Microsoft app in that
+  browser. That's why the default, `LOGOUT_MODE=local`, leaves it alone.
 
 **What BroadcastChannel adds.** After the server session is gone, a tab you left
 open on `/handbook` is still showing a rendered page with your name on it. It

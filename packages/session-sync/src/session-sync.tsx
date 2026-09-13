@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { LOGGED_OUT_PATH, SESSION_CHANNEL, isLogoutMessage } from './contract';
+import { isOwnBroadcast } from './use-logout';
 
 /**
  * Listens for a sign-out that happened in another tab and follows it.
@@ -34,6 +35,12 @@ export function SessionSync() {
 
     channel.onmessage = (event: MessageEvent<unknown>) => {
       if (!isLogoutMessage(event.data)) return;
+
+      // This page started the sign-out, and its own form POST is already
+      // navigating — to the signed-out page, or to Entra first with
+      // LOGOUT_MODE=full. A replace() here would cancel that navigation before
+      // the logout response's redirect is followed.
+      if (isOwnBroadcast(event.data)) return;
 
       // Already on the confirmation page — redirecting again would loop.
       if (window.location.pathname === LOGGED_OUT_PATH) return;

@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { Issuer, generators, type Client, type IdTokenClaims } from 'openid-client';
+import type { SessionRecord } from '@bff/internal-auth';
 import { LOGGED_OUT_PATH } from '@bff/session-sync/contract';
-import { azure } from '../env';
+import { azure, forceLoginPrompt, logoutMode } from '../env';
 import {
   clearTransientCookie,
   readSessionId,
@@ -96,6 +97,10 @@ export const oidcProvider: AuthProvider = {
       code_challenge: codeChallenge,
       code_challenge_method: 'S256',
       response_mode: 'query',
+      // FORCE_LOGIN_PROMPT, a dev/demo aid. Entra asks for credentials for this
+      // app even though the user already has an Entra session, and leaves that
+      // session alone — other Microsoft apps in the browser stay signed in.
+      ...(forceLoginPrompt() ? { prompt: 'login' } : {}),
     });
 
     const res = NextResponse.redirect(authorizationUrl, { status: 302 });
@@ -123,6 +128,7 @@ export const oidcProvider: AuthProvider = {
   async handleCallback(req: NextRequest): Promise<Response> {
     const client = await getClient();
     const { redirectUri, clientId } = azure();
+    const keepIdToken = logoutMode() === 'full';
 
     const state = req.cookies.get(COOKIE_STATE)?.value;
     const nonce = req.cookies.get(COOKIE_NONCE)?.value;
@@ -160,6 +166,10 @@ export const oidcProvider: AuthProvider = {
       const user = sessionFrom(claims);
       if (!user) return fail('ID token is missing sub or an email claim.', 401);
 
+      // Kept only when sign-out will send it back to Entra as id_token_hint.
+      // In LOGOUT_MODE=local nothing would ever read it, so it isn't stored.
+      if (keepIdToken && tokenSet.id_token) user.idToken = tokenSet.id_token;
+
       const sid = await rotateSessionOnLogin(readSessionId(req), user);
 
       const res = NextResponse.redirect(new URL(returnTo, publicOrigin(req)), { status: 303 });
@@ -172,30 +182,36 @@ export const oidcProvider: AuthProvider = {
     }
   },
 
-  async buildLogoutRedirect(req: NextRequest): Promise<string> {
+  async buildLogoutRedirect(req: NextRequest, session: SessionRecord | null): Promise<string> {
     const loggedOut = new URL(LOGGED_OUT_PATH, publicOrigin(req)).toString();
 
-    // Destroying the local session is not enough on its own. The user still has
-    // a live sign-in session with Entra, so the next visit to /api/auth/login
-    // would sign them straight back in without a prompt — which does not look
-    // like "signed out" to anyone. This is the front-channel logout that ends
-    // the session at the identity provider too.
     try {
+      // local: this app's session is gone, and that is the whole of it. The
+      // user's Entra session is untouched, so they stay signed in to Teams,
+      // Outlook and the rest — and the next sign-in here completes with no
+      // prompt.
+      if (logoutMode() === 'local') return loggedOut;
+
+      // full: end the Entra session too, so the next sign-in asks for
+      // credentials. That also signs the user out of every other Microsoft app
+      // in this browser. The endpoint comes from the discovery document.
       const client = await getClient();
 
-      // `post_logout_redirect_uri` has to be registered on the app
-      // registration, exactly as sent, or Entra drops the user on its own page
-      // instead of bringing them back here.
-      return client.endSessionUrl({ post_logout_redirect_uri: loggedOut });
-
-      // Passing `id_token_hint` here would let Entra sign out the specific
-      // account without showing an account picker. It would mean keeping the
-      // raw ID token in the session record, which is a deliberate change to
-      // what Redis holds — not made yet.
+      return client.endSessionUrl({
+        // Has to match a redirect URI on the app registration, exactly as sent,
+        // or Entra leaves the user on its own signed-out page instead of
+        // bringing them back here.
+        post_logout_redirect_uri: loggedOut,
+        // Tells Entra which account is signing out, so it can skip the account
+        // picker. Absent for a session created while LOGOUT_MODE=local; the
+        // library drops the parameter when it's undefined.
+        id_token_hint: session?.idToken,
+      });
     } catch (error) {
-      // No end_session_endpoint in the discovery document, or discovery itself
-      // failed. The local session is already destroyed, so the honest outcome
-      // is to confirm that much rather than error out.
+      // No end_session_endpoint in the discovery document, discovery itself
+      // failed, or LOGOUT_MODE is invalid. The local session is already
+      // destroyed, so the honest outcome is to confirm that much rather than
+      // error out.
       console.warn(
         '[oidc] no end-session redirect available, falling back to local confirmation:',
         error instanceof Error ? error.message : error,

@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { clearSessionCookie, readSessionId } from '@/lib/cookies';
-import { destroySession } from '@/lib/session';
+import { destroySession, peekSession } from '@/lib/session';
 import { getAuthProvider } from '@/lib/auth/provider';
 
 export const runtime = 'nodejs';
@@ -31,13 +31,23 @@ const CLEAR_SITE_DATA = '"cache", "cookies", "storage"';
 export async function POST(req: NextRequest) {
   const sid = readSessionId(req);
 
+  // Read before deleting. With AUTH_MODE=oidc and LOGOUT_MODE=full the Entra
+  // redirect sends the stored ID token as id_token_hint, and after the DEL
+  // below there is nothing left to read it from.
+  const session = await peekSession(sid);
+
   // DEL sess:<sid>. From this point the session id is meaningless: any request
   // that still carries the cookie will fail to resolve and be treated as signed
   // out, including requests already in flight from other tabs.
   await destroySession(sid);
 
+  // Only now is the destination decided: the confirmation page, or Entra's
+  // end_session_endpoint when LOGOUT_MODE=full. The cookie is cleared on the
+  // same response that carries the redirect, so by the time the browser reaches
+  // Microsoft this app's sign-out is already complete. A user who abandons the
+  // flow on Microsoft's page leaves nothing alive here.
   const provider = await getAuthProvider();
-  const destination = await provider.buildLogoutRedirect(req);
+  const destination = await provider.buildLogoutRedirect(req, session);
 
   const res = NextResponse.redirect(destination, { status: 303 });
 
